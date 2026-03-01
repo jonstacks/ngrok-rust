@@ -73,6 +73,9 @@ pub fn with_traffic_policy(policy: impl Into<String> + Send + 'static) -> Endpoi
 
 /// Sets the endpoint's bindings.
 ///
+/// Note: Currently, only the first binding value is used when creating an endpoint.
+/// Pass a single-element vector for the desired binding.
+///
 /// See <https://ngrok.com/docs/universal-gateway/bindings/>
 pub fn with_bindings(bindings: Vec<String>) -> EndpointOption {
     EndpointOption {
@@ -108,20 +111,14 @@ impl EndpointOpts {
             Some(url) => {
                 if let Ok(parsed) = url::Url::parse(url) {
                     match parsed.scheme() {
-                        "http" | "https" | "tcp" | "tls" => {
-                            // We need to return a static str, so match again
-                            if url.starts_with("http://") {
-                                return "http";
-                            } else if url.starts_with("tcp://") {
-                                return "tcp";
-                            } else if url.starts_with("tls://") {
-                                return "tls";
-                            }
-                        }
-                        _ => {}
+                        "http" => "http",
+                        "tcp" => "tcp",
+                        "tls" => "tls",
+                        _ => "https",
                     }
+                } else {
+                    "https"
                 }
-                "https"
             }
             None => "https",
         }

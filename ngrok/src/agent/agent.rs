@@ -509,7 +509,8 @@ fn apply_common_opts_http(builder: &mut HttpTunnelBuilder, opts: &EndpointOpts) 
         builder.pooling_enabled(pooling);
     }
     if !opts.bindings.is_empty() {
-        // Use the first binding (the API supports one at a time)
+        // The underlying builder's binding() method supports only one binding at a time.
+        // Use the first binding from the list.
         if let Some(binding) = opts.bindings.first() {
             builder.binding(binding.clone());
         }
