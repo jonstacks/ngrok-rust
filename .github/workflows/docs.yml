@@ -9,7 +9,7 @@ jobs:
     name: Build Rustdocs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
@@ -20,10 +20,7 @@ jobs:
         run: sudo apt-get update
       - name: install protoc
         run: sudo apt-get -o Acquire::Retries=3 install -y protobuf-compiler
-      - uses: actions-rs/cargo@v1
-        with:
-          command: doc
-          args: --no-deps
+      - run: cargo doc --no-deps
 
       - name: Archive docs
         shell: sh
