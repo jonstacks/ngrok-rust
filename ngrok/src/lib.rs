@@ -35,6 +35,12 @@ pub mod config {
 
 mod proxy_proto;
 
+/// A high-level agent API for the ngrok service.
+///
+/// Provides a clean interface inspired by the ngrok-go v2 API, with session
+/// management, endpoint creation, and event handling.
+pub mod agent;
+
 /// Types for working with the ngrok session.
 pub mod session;
 /// Types for working with ngrok tunnels.
