@@ -7,6 +7,7 @@ name: Publish Docs
 jobs:
   build:
     name: Build Rustdocs
+    if: github.repository == 'ngrok/ngrok-rust'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -37,6 +38,7 @@ jobs:
 
     # Deployment job
   deploy:
+    if: github.repository == 'ngrok/ngrok-rust'
     # Grant GITHUB_TOKEN the permissions required to make a Pages deployment
     permissions:
       pages: write      # to deploy to Pages
