@@ -52,8 +52,8 @@ Online integration tests in `ngrok/src/online_tests.rs` require a valid `NGROK_A
 ### Code Coverage
 
 ```bash
-cargo llvm-cov --workspace --all-targets --all-features           # Show coverage in terminal
-cargo llvm-cov --workspace --all-targets --all-features --open    # Open HTML coverage report in browser
+cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs           # Show coverage in terminal
+cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs --open    # Open HTML coverage report in browser
 ```
 
 ### Semver Compliance
