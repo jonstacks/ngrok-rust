@@ -29,8 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: jrobsonchase/direnv-action@v0.7
-      - uses: ./.github/workflows/rust-cache
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/rust-cache
       - run: cargo udeps --workspace --all-targets --all-features
 
   fmt:
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: jrobsonchase/direnv-action@v0.7
+      - uses: ./.github/actions/nix-setup
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -46,8 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: jrobsonchase/direnv-action@v0.7
-      - uses: ./.github/workflows/rust-cache
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/rust-cache
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
 
   test-nix:
@@ -55,8 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: jrobsonchase/direnv-action@v0.7
-      - uses: ./.github/workflows/rust-cache
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/rust-cache
       - run: cargo test --workspace --all-targets
 
   test-stable:
@@ -73,7 +73,7 @@ jobs:
           override: true
       # We don't actually have sccache installed here (yet), but it still
       # benefits from the cargo cache.
-      - uses: ./.github/workflows/rust-cache
+      - uses: ./.github/actions/rust-cache
       - run: cargo test --features=paid-tests,long-tests --workspace --all-targets
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
@@ -92,7 +92,7 @@ jobs:
           override: true
       # We don't actually have sccache installed here (yet), but it still
       # benefits from the cargo cache.
-      - uses: ./.github/workflows/rust-cache
+      - uses: ./.github/actions/rust-cache
       - run: cargo test --workspace --all-tests
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
@@ -105,8 +105,8 @@ jobs:
         crate: [muxado, ngrok]
     steps:
       - uses: actions/checkout@v6
-      - uses: jrobsonchase/direnv-action@v0.7
-      - uses: ./.github/workflows/rust-cache
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/rust-cache
       - run: cargo semver-checks check-release -p ${{ matrix.crate }}
         name: semver checks
 
