@@ -21,11 +21,11 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Setup Nix and Direnv
-        uses: jrobsonchase/direnv-action@v0.7
+      - name: Setup Nix
+        uses: ./.github/actions/nix-setup
 
-      - name: Verify environment
-        run: cargo --version && rustc --version
+      - name: Load dev shell via direnv
+        run: direnv exec . echo "Dev shell loaded successfully"
