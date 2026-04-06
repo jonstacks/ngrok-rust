@@ -385,6 +385,7 @@ fn apply_http_opts(b: &mut HttpTunnelBuilder, opts: &EndpointOptions) {
     if let Some(ref ft) = opts.forwards_to {
         b.forwards_to(ft);
     }
+    // Only the first binding is used; the underlying builder panics on multiple calls.
     if let Some(binding) = opts.bindings.first() {
         b.binding(binding);
     }
@@ -409,6 +410,7 @@ fn apply_tcp_opts(b: &mut TcpTunnelBuilder, opts: &EndpointOptions) {
     if let Some(ref ft) = opts.forwards_to {
         b.forwards_to(ft);
     }
+    // Only the first binding is used; the underlying builder panics on multiple calls.
     if let Some(binding) = opts.bindings.first() {
         b.binding(binding);
     }
@@ -430,6 +432,7 @@ fn apply_tls_opts(b: &mut TlsTunnelBuilder, opts: &EndpointOptions) {
     if let Some(ref ft) = opts.forwards_to {
         b.forwards_to(ft);
     }
+    // Only the first binding is used; the underlying builder panics on multiple calls.
     if let Some(binding) = opts.bindings.first() {
         b.binding(binding);
     }

@@ -57,7 +57,7 @@ struct AgentConfig {
     proxy_url: Option<String>,
     auto_connect: bool,
     metadata: Option<String>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in future v2 API features
     description: Option<String>,
     heartbeat_interval: Option<Duration>,
     heartbeat_tolerance: Option<Duration>,

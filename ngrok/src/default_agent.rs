@@ -79,6 +79,10 @@ pub fn reset_default_agent() {
 /// Start building an endpoint listener using the default agent.
 ///
 /// This is a convenience function equivalent to `default_agent().listen()`.
+///
+/// Note: Each call leaks a small `Agent` (Arc-based, ~pointer-sized) to
+/// obtain a `'static` lifetime. This is acceptable for module-level
+/// convenience functions that are called infrequently.
 pub fn listen() -> EndpointListenBuilder<'static> {
     let agent = default_agent();
     let agent_ref: &'static Agent = Box::leak(Box::new(agent));
