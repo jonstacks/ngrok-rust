@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "The ngrok agent SDK"
 repository = "https://github.com/ngrok/ngrok-rust"
+rust-version = "1.85"
 
 [dependencies]
 arc-swap = "1.5.2"
