@@ -105,7 +105,7 @@ jobs:
         crate: [muxado, ngrok]
     steps:
       - uses: actions/checkout@v6
-      - uses: ./.github/actions/setup-nix
+      - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/rust-cache
       - run: cargo semver-checks check-release -p ${{ matrix.crate }}
         name: semver checks
