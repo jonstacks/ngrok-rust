@@ -39,3 +39,27 @@ impl Upstream {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_upstream_new() {
+        let u = Upstream::new("localhost:8080");
+        assert_eq!(u.addr, "localhost:8080");
+        assert!(u.protocol.is_none());
+        assert!(u.proxy_proto.is_none());
+        assert!(u.verify_upstream_tls);
+    }
+
+    #[test]
+    fn test_upstream_builder() {
+        let u = Upstream::new("localhost:8080")
+            .protocol("http2")
+            .verify_upstream_tls(false);
+        assert_eq!(u.addr, "localhost:8080");
+        assert_eq!(u.protocol.as_deref(), Some("http2"));
+        assert!(!u.verify_upstream_tls);
+    }
+}

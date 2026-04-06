@@ -443,3 +443,57 @@ fn apply_tls_opts(b: &mut TlsTunnelBuilder, opts: &EndpointOptions) {
         b.verify_upstream_tls(vut);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_endpoint_url_none() {
+        let (scheme, domain, addr) = parse_endpoint_url(None).unwrap();
+        assert_eq!(scheme, "https");
+        assert!(domain.is_none());
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn test_parse_endpoint_url_https() {
+        let (scheme, domain, addr) = parse_endpoint_url(Some("https://example.ngrok.app")).unwrap();
+        assert_eq!(scheme, "https");
+        assert_eq!(domain.as_deref(), Some("example.ngrok.app"));
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn test_parse_endpoint_url_tcp() {
+        let (scheme, domain, addr) =
+            parse_endpoint_url(Some("tcp://0.tcp.ngrok.io:12345")).unwrap();
+        assert_eq!(scheme, "tcp");
+        assert!(domain.is_none());
+        assert_eq!(addr.as_deref(), Some("0.tcp.ngrok.io:12345"));
+    }
+
+    #[test]
+    fn test_parse_endpoint_url_tls() {
+        let (scheme, domain, addr) = parse_endpoint_url(Some("tls://example.ngrok.app")).unwrap();
+        assert_eq!(scheme, "tls");
+        assert_eq!(domain.as_deref(), Some("example.ngrok.app"));
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn test_parse_endpoint_url_no_scheme() {
+        let (scheme, domain, addr) = parse_endpoint_url(Some("example.ngrok.app")).unwrap();
+        assert_eq!(scheme, "https");
+        assert_eq!(domain.as_deref(), Some("example.ngrok.app"));
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn test_parse_endpoint_url_http() {
+        let (scheme, domain, addr) = parse_endpoint_url(Some("http://example.ngrok.app")).unwrap();
+        assert_eq!(scheme, "http");
+        assert_eq!(domain.as_deref(), Some("example.ngrok.app"));
+        assert!(addr.is_none());
+    }
+}

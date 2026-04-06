@@ -132,3 +132,25 @@ pub async fn forward_to(
     }
     fwd_builder.start().await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_endpoint_options_default() {
+        let opts = EndpointOptions::default();
+        assert!(opts.url.is_none());
+        assert!(opts.traffic_policy.is_none());
+        assert!(opts.metadata.is_none());
+        assert!(opts.description.is_none());
+        assert!(opts.bindings.is_empty());
+        assert!(opts.pooling_enabled.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_default_agent_in_async() {
+        // This must not panic — verifies OnceLock+Mutex is safe in async
+        let _agent = default_agent();
+    }
+}

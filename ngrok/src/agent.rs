@@ -390,3 +390,38 @@ impl AgentSession {
         self.session.id()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_builder_build() {
+        let agent = Agent::builder().authtoken("test-token").build();
+        assert!(agent.is_ok());
+    }
+
+    #[test]
+    fn test_agent_builder_from_env() {
+        let agent = Agent::builder().authtoken_from_env().build();
+        assert!(agent.is_ok());
+    }
+
+    #[test]
+    fn test_agent_clone() {
+        let agent = Agent::builder().build().unwrap();
+        let _clone = agent.clone();
+    }
+
+    #[tokio::test]
+    async fn test_agent_not_connected() {
+        let agent = Agent::builder().auto_connect(false).build().unwrap();
+        let result = agent.ensure_connected().await;
+        assert!(result.is_err());
+        match result {
+            Err(NgrokError::NotConnected) => {}
+            Err(other) => panic!("expected NotConnected, got: {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+}

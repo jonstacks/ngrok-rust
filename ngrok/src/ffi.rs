@@ -300,3 +300,55 @@ impl FfiEndpointForwarder {
         rx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ffi_error_from_ngrok_error() {
+        let err = NgrokError::Api {
+            code: Some("ERR_123".into()),
+            message: "test".into(),
+        };
+        let ffi_err = FfiError::from(err);
+        assert_eq!(ffi_err.code.as_deref(), Some("ERR_123"));
+        assert_eq!(ffi_err.message, "test");
+    }
+
+    #[test]
+    fn test_ffi_error_display() {
+        let err = FfiError {
+            code: Some("ERR_1".into()),
+            message: "msg".into(),
+        };
+        assert_eq!(err.to_string(), "ERR_1: msg");
+
+        let err = FfiError {
+            code: None,
+            message: "msg".into(),
+        };
+        assert_eq!(err.to_string(), "msg");
+    }
+
+    #[test]
+    fn test_ffi_endpoint_options_default() {
+        let opts = FfiEndpointOptions::default();
+        assert!(opts.url.is_none());
+        assert!(opts.traffic_policy.is_none());
+        assert!(opts.bindings.is_empty());
+    }
+
+    #[test]
+    fn test_ffi_upstream_default() {
+        let up = FfiUpstream::default();
+        assert!(up.addr.is_empty());
+        assert!(up.verify_upstream_tls);
+    }
+
+    #[test]
+    fn test_ffi_agent_from_env() {
+        let agent = FfiAgent::from_env();
+        assert!(agent.is_ok());
+    }
+}

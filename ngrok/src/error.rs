@@ -72,3 +72,49 @@ impl From<RpcError> for NgrokError {
         NgrokError::Api { code, message }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ngrok_error_display() {
+        let err = NgrokError::Api {
+            code: Some("ERR_NGROK_108".into()),
+            message: "not found".into(),
+        };
+        assert_eq!(err.to_string(), "not found");
+
+        let err = NgrokError::NotConnected;
+        assert_eq!(err.to_string(), "agent not connected");
+
+        let err = NgrokError::UnsupportedScheme {
+            scheme: "ftp".into(),
+        };
+        assert_eq!(err.to_string(), "unsupported URL scheme 'ftp'");
+
+        let err = NgrokError::InvalidUrl {
+            url: "bad".into(),
+            reason: "no scheme".into(),
+        };
+        assert_eq!(err.to_string(), "invalid URL 'bad': no scheme");
+    }
+
+    #[test]
+    fn test_ngrok_error_code() {
+        let err = NgrokError::Api {
+            code: Some("ERR_123".into()),
+            message: "msg".into(),
+        };
+        assert_eq!(err.code(), Some("ERR_123"));
+
+        let err = NgrokError::Api {
+            code: None,
+            message: "msg".into(),
+        };
+        assert_eq!(err.code(), None);
+
+        let err = NgrokError::NotConnected;
+        assert_eq!(err.code(), None);
+    }
+}

@@ -4,6 +4,8 @@ members = [
 	"muxado",
 	"ngrok",
 	"cargo-doc-ngrok",
+	"examples/ffi-validation/javascript",
+	"examples/ffi-validation/elixir/native/ngrok_nif",
 ]
 
 [profile.release]

@@ -1,0 +1,12 @@
+[package]
+name = "ngrok-napi-validation"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ngrok = { path = "../../../ngrok", features = ["ffi"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
