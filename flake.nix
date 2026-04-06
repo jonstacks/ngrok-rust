@@ -26,6 +26,7 @@
         toolchain = pkgs.fenix.complete.withComponents [
           "cargo"
           "clippy"
+          "llvm-tools-preview"
           "rust-src"
           "rustc"
           "rustfmt"
@@ -35,6 +36,14 @@
           set -euf -o pipefail
           ${toolchain}/bin/cargo clippy --fix --allow-staged --allow-dirty --all-targets --all-features
           ${toolchain}/bin/cargo fmt
+        '';
+        coverage = pkgs.writeShellScriptBin "coverage" ''
+          set -euf -o pipefail
+          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs
+        '';
+        coverage-html = pkgs.writeShellScriptBin "coverage-html" ''
+          set -euf -o pipefail
+          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs --open
         '';
         pre-commit = pkgs.writeShellScript "pre-commit" ''
           cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -106,8 +115,11 @@
           buildInputs = with pkgs; [
             toolchain
             fix-n-fmt
+            coverage
+            coverage-html
             setup-hooks
             cargo-udeps
+            cargo-llvm-cov
             semver-checks
             extract-version
             bashInteractive
