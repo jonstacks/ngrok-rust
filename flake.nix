@@ -110,6 +110,7 @@
             cargo-udeps
             semver-checks
             extract-version
+            bashInteractive
           ] ++ lib.optionals stdenv.isDarwin [
             # nix darwin stdenv has broken libiconv: https://github.com/NixOS/nixpkgs/issues/158331
             libiconv
