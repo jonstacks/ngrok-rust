@@ -49,6 +49,13 @@ cargo test --workspace --all-targets         # Unit and integration tests
 
 Online integration tests in `ngrok/src/online_tests.rs` require a valid `NGROK_AUTHTOKEN` environment variable. These are skipped automatically if the token is not set. Tests guarded by `#[cfg(feature = "paid-tests")]` require a paid ngrok account.
 
+### Code Coverage
+
+```bash
+cargo llvm-cov --workspace --all-targets --all-features           # Show coverage in terminal
+cargo llvm-cov --workspace --all-targets --all-features --open    # Open HTML coverage report in browser
+```
+
 ### Semver Compliance
 
 ```bash
@@ -108,8 +115,10 @@ A [Nix flake](https://nixos.org/manual/nix/stable/command-ref/new-cli/nix3-flake
 Nix shortcuts (when inside `nix develop`):
 
 ```bash
-fix-n-fmt    # Auto-fix clippy warnings and reformat code
-setup-hooks  # Install pre-commit hooks
+fix-n-fmt       # Auto-fix clippy warnings and reformat code
+setup-hooks     # Install pre-commit hooks
+coverage        # Show code coverage in the terminal
+coverage-html   # Open HTML code coverage report in the browser
 ```
 
 ---

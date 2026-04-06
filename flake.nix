@@ -36,6 +36,14 @@
           ${toolchain}/bin/cargo clippy --fix --allow-staged --allow-dirty --all-targets --all-features
           ${toolchain}/bin/cargo fmt
         '';
+        coverage = pkgs.writeShellScriptBin "coverage" ''
+          set -euf -o pipefail
+          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features
+        '';
+        coverage-html = pkgs.writeShellScriptBin "coverage-html" ''
+          set -euf -o pipefail
+          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features --open
+        '';
         pre-commit = pkgs.writeShellScript "pre-commit" ''
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           result=$?
@@ -106,8 +114,11 @@
           buildInputs = with pkgs; [
             toolchain
             fix-n-fmt
+            coverage
+            coverage-html
             setup-hooks
             cargo-udeps
+            cargo-llvm-cov
             semver-checks
             extract-version
             bashInteractive
