@@ -26,6 +26,7 @@
         toolchain = pkgs.fenix.complete.withComponents [
           "cargo"
           "clippy"
+          "llvm-tools"
           "rust-src"
           "rustc"
           "rustfmt"
@@ -38,11 +39,15 @@
         '';
         coverage = pkgs.writeShellScriptBin "coverage" ''
           set -euf -o pipefail
-          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features
+          LLVM_COV=${toolchain}/bin/llvm-cov \
+          LLVM_PROFDATA=${toolchain}/bin/llvm-profdata \
+            ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features
         '';
         coverage-html = pkgs.writeShellScriptBin "coverage-html" ''
           set -euf -o pipefail
-          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features --open
+          LLVM_COV=${toolchain}/bin/llvm-cov \
+          LLVM_PROFDATA=${toolchain}/bin/llvm-profdata \
+            ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features --open
         '';
         pre-commit = pkgs.writeShellScript "pre-commit" ''
           cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -111,6 +116,8 @@
           OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
           OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
           RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache";
+          LLVM_COV = "${toolchain}/bin/llvm-cov";
+          LLVM_PROFDATA = "${toolchain}/bin/llvm-profdata";
           buildInputs = with pkgs; [
             toolchain
             fix-n-fmt
