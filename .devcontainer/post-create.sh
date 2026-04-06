@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+# The following is copied from the nix-entrypoint.sh file set up by
+# the nix feature. This ensures that the nix daemon is running in the background
+# before we try to use any nix commands.
+# Attempt to start daemon
+set +e
+if ! pidof nix-daemon > /dev/null 2>&1; then
+    start_ok=false
+    if [ "$(id -u)" = "0" ]; then
+        ( . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; /nix/var/nix/profiles/default/bin/nix-daemon > /tmp/nix-daemon.log 2>&1 ) &
+        if [ "$?" = "0" ]; then
+            start_ok=true
+        fi
+    elif type sudo > /dev/null 2>&1; then
+        sudo -n sh -c '. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh; /nix/var/nix/profiles/default/bin/nix-daemon > /tmp/nix-daemon.log 2>&1' &
+        if [ "$?" = "0" ]; then
+            start_ok=true
+        fi
+    fi
+    if [ "${start_ok}" = "false" ]; then
+            echo -e 'Failed to start nix-daemon as root. Set multiUser to false in your feature configuration if you would\nprefer to run the container as a non-root. You may also start the daemon manually if you have sudo\ninstalled and configured for your user by running "sudo nix-daemon &"'
+    fi
+fi
+
+# Wait for nix-daemon to be ready (up to 30 seconds)
+echo "Waiting for nix-daemon to be ready..."
+daemon_ready=false
+for i in $(seq 1 30); do
+    if [ -S /nix/var/nix/daemon-socket/socket ] && nix store ping --store daemon > /dev/null 2>&1; then
+        echo "nix-daemon is ready"
+        daemon_ready=true
+        break
+    fi
+    sleep 1
+done
+
+if [ "${daemon_ready}" != "true" ]; then
+    echo "Timed out waiting for nix-daemon to become ready. See /tmp/nix-daemon.log for details." >&2
+    exit 1
+fi
+set -e
+
+direnv allow
