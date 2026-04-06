@@ -41,13 +41,13 @@
           set -euf -o pipefail
           LLVM_COV=${toolchain}/bin/llvm-cov \
           LLVM_PROFDATA=${toolchain}/bin/llvm-profdata \
-            ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features
+            ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs
         '';
         coverage-html = pkgs.writeShellScriptBin "coverage-html" ''
           set -euf -o pipefail
           LLVM_COV=${toolchain}/bin/llvm-cov \
           LLVM_PROFDATA=${toolchain}/bin/llvm-profdata \
-            ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --all-features --open
+            ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs --open
         '';
         pre-commit = pkgs.writeShellScript "pre-commit" ''
           cargo clippy --workspace --all-targets --all-features -- -D warnings
