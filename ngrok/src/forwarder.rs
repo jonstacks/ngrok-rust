@@ -8,13 +8,13 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::{
-    prelude::{
+    session::RpcError,
+    tunnel::{
         EdgeInfo,
         EndpointInfo,
         TunnelCloser,
         TunnelInfo,
     },
-    session::RpcError,
     Tunnel,
 };
 
