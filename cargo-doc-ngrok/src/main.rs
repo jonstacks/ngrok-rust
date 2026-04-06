@@ -19,6 +19,7 @@ use hyper_util::{
 };
 use ngrok::prelude::*;
 use watchexec::{
+    Watchexec,
     action::{
         Action,
         Outcome,
@@ -31,7 +32,6 @@ use watchexec::{
     error::CriticalError,
     handler::PrintDebug,
     signal::source::MainSignal,
-    Watchexec,
 };
 
 #[derive(Parser, Debug)]

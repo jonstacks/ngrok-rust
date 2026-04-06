@@ -2,8 +2,8 @@ use std::fmt::Debug;
 
 use muxado::typed::StreamType;
 use serde::{
-    de::DeserializeOwned,
     Serialize,
+    de::DeserializeOwned,
 };
 
 pub trait RpcRequest: Serialize + Debug {
@@ -12,14 +12,14 @@ pub trait RpcRequest: Serialize + Debug {
 }
 
 macro_rules! rpc_req {
-    ($req:ty, $resp:ty, $typ:expr; $($t:tt)*) => {
+    ($req:ty, $resp:ty, $typ:expr_2021; $($t:tt)*) => {
         impl <$($t)*> $crate::internals::rpc::RpcRequest for $req
         {
             type Response = $resp;
             const TYPE: StreamType = $typ;
         }
     };
-    ($req:ty, $resp:ty, $typ:expr) => {
+    ($req:ty, $resp:ty, $typ:expr_2021) => {
         impl $crate::internals::rpc::RpcRequest for $req {
             type Response = $resp;
             const TYPE: StreamType = $typ;
