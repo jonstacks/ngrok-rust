@@ -29,8 +29,9 @@ use tower::{
 };
 
 // Note: TLS termination (formerly `.termination()`) is now configured via
-// traffic policy rather than the listener builder. See ngrok documentation
-// for traffic policy examples.
+// traffic policy rather than the listener builder. For example, you can add
+// `.traffic_policy(policy)` to the listen builder with a policy that handles
+// TLS termination. See https://ngrok.com/docs/http/traffic-policy/ for details.
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
