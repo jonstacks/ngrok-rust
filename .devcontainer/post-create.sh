@@ -25,14 +25,20 @@ fi
 
 # Wait for nix-daemon to be ready (up to 30 seconds)
 echo "Waiting for nix-daemon to be ready..."
+daemon_ready=false
 for i in $(seq 1 30); do
-    if nix --version > /dev/null 2>&1; then
+    if [ -S /nix/var/nix/daemon-socket/socket ] && nix store ping --store daemon > /dev/null 2>&1; then
         echo "nix-daemon is ready"
+        daemon_ready=true
         break
     fi
     sleep 1
 done
 
+if [ "${daemon_ready}" != "true" ]; then
+    echo "Timed out waiting for nix-daemon to become ready. See /tmp/nix-daemon.log for details." >&2
+    exit 1
+fi
 set -e
 
 direnv allow
