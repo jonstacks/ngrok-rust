@@ -19,15 +19,18 @@ use hyper_util::{
     rt::TokioExecutor,
     server,
 };
-use ngrok::prelude::*;
+use ngrok::{
+    conn::ConnInfo,
+    Endpoint,
+};
 use tower::{
     util::ServiceExt,
     Service,
 };
 
-const CERT: &[u8] = include_bytes!("domain.crt");
-const KEY: &[u8] = include_bytes!("domain.key");
-// const CA_CERT: &[u8] = include_bytes!("ca.crt");
+// Note: TLS termination (formerly `.termination()`) is now configured via
+// traffic policy rather than the listener builder. See ngrok documentation
+// for traffic policy examples.
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -41,24 +44,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         ),
     );
 
-    let sess = ngrok::Session::builder()
-        .authtoken_from_env()
-        .connect()
+    let agent = ngrok::Agent::builder().authtoken_from_env().build()?;
+
+    let mut listener = agent
+        .listen()
+        .url("tls://example.ngrok.app")
+        .metadata("example tunnel metadata from rust")
+        .start()
         .await?;
 
-    let mut listener = sess
-        .tls_endpoint()
-        // .allow_cidr("0.0.0.0/0")
-        // .deny_cidr("10.1.1.1/32")
-        // .verify_upstream_tls(false)
-        // .domain("<somedomain>.ngrok.io")
-        // .forwards_to("example rust"),
-        // .mutual_tlsca(CA_CERT.into())
-        // .proxy_proto(ProxyProto::None)
-        .termination(CERT.into(), KEY.into())
-        .metadata("example tunnel metadata from rust")
-        .listen()
-        .await?;
+    println!("TLS listener started on URL: {:?}", listener.url());
 
     let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
 

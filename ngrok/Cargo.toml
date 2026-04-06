@@ -85,12 +85,7 @@ name = "axum"
 required-features = ["axum"]
 
 [[example]]
-name = "labeled"
-required-features = ["axum"]
-
-[[example]]
 name = "mingrok"
-required-features = ["hyper"]
 
 [features]
 default = ["aws-lc-rs"]
