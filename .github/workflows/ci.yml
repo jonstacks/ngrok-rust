@@ -110,4 +110,21 @@ jobs:
       - run: cargo semver-checks check-release -p ${{ matrix.crate }}
         name: semver checks
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/nix-setup
+      - uses: ./.github/actions/rust-cache
+      - run: coverage-ci
+      - uses: codecov/codecov-action@v6
+        with:
+          fail_ci_if_error: true
+          files: ./lcov.info
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
 
