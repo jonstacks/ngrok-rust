@@ -104,8 +104,14 @@ impl Frame {
     }
     pub fn goaway(last_stream_id: StreamID, error: Error, mut message: Bytes) -> Frame {
         // GoAway body is 4-byte last_stream_id + 4-byte error_code + variable message.
-        // Truncate the message so the total body fits in the 24-bit length field.
-        const MAX_MSG_LEN: usize = LENGTH_MAX as usize - 8;
+        // Spec §protocol.feature: debug string must be capped at 1 MiB.
+        const MAX_DEBUG_LEN: usize = 1024 * 1024; // 1 MiB per spec
+        // Also cap at the protocol's 24-bit frame length limit.
+        const MAX_MSG_LEN: usize = if LENGTH_MAX as usize - 8 < MAX_DEBUG_LEN {
+            LENGTH_MAX as usize - 8
+        } else {
+            MAX_DEBUG_LEN
+        };
         if message.len() > MAX_MSG_LEN {
             message = message.slice(..MAX_MSG_LEN);
         }

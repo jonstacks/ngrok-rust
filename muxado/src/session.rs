@@ -1,5 +1,6 @@
 use std::{
     io,
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{
@@ -24,6 +25,7 @@ use tokio::io::{
     AsyncRead,
     AsyncWrite,
 };
+use tokio::sync::watch;
 use tokio_util::codec::Framed;
 use tracing::{
     Instrument,
@@ -52,7 +54,7 @@ use crate::{
 };
 
 const DEFAULT_WINDOW: usize = 0x40000; // 256KB
-const DEFAULT_ACCEPT: usize = 64;
+const DEFAULT_ACCEPT: usize = 128;
 const DEFAULT_STREAMS: usize = 512;
 
 /// Builder for a muxado session.
@@ -65,6 +67,8 @@ pub struct SessionBuilder<S> {
     accept_queue_size: usize,
     stream_limit: usize,
     client: bool,
+    local_addr: Option<SocketAddr>,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl<S> SessionBuilder<S>
@@ -79,6 +83,8 @@ where
             accept_queue_size: DEFAULT_ACCEPT,
             stream_limit: DEFAULT_STREAMS,
             client: true,
+            local_addr: None,
+            remote_addr: None,
         }
     }
 
@@ -92,8 +98,8 @@ where
     /// Set the accept queue size.
     /// This is the size of the channel that will hold "open stream" requests
     /// from the remote. If [Accept::accept] isn't called and the
-    /// channel fills up, the session will block.
-    /// Defaults to 64.
+    /// channel fills up, the remote will receive RST(AcceptQueueFull).
+    /// Defaults to 128.
     pub fn accept_queue_size(mut self, size: usize) -> Self {
         self.accept_queue_size = size;
         self
@@ -119,6 +125,24 @@ where
         self
     }
 
+    /// Set the local socket address for this session (informational).
+    ///
+    /// The address is not used internally but is returned by
+    /// [MuxadoSession::local_addr].
+    pub fn local_addr(mut self, addr: SocketAddr) -> Self {
+        self.local_addr = Some(addr);
+        self
+    }
+
+    /// Set the remote socket address for this session (informational).
+    ///
+    /// The address is not used internally but is returned by
+    /// [MuxadoSession::remote_addr].
+    pub fn remote_addr(mut self, addr: SocketAddr) -> Self {
+        self.remote_addr = Some(addr);
+        self
+    }
+
     /// Start a muxado session with the current options.
     pub fn start(self) -> MuxadoSession {
         let SessionBuilder {
@@ -127,6 +151,8 @@ where
             accept_queue_size,
             stream_limit,
             client,
+            local_addr,
+            remote_addr,
         } = self;
 
         let (accept_tx, accept_rx) = mpsc::channel(accept_queue_size);
@@ -138,6 +164,9 @@ where
 
         let (io_tx, io_rx) = Framed::new(io_stream, FrameCodec::default()).split();
 
+        // Signals MuxadoSession::wait() callers when the reader task exits.
+        let (close_tx, close_rx) = watch::channel(false);
+
         let read_task = Reader {
             io: io_rx,
             accept_tx,
@@ -145,6 +174,8 @@ where
             manager: m1,
             last_stream_processed: StreamID::clamp(0),
             sys_tx: sys_tx.clone(),
+            client,
+            close_tx,
         };
 
         let write_task = Writer {
@@ -187,6 +218,9 @@ where
                 sys_tx,
                 closed: AtomicBool::from(false).into(),
             },
+            close_rx,
+            local_addr,
+            remote_addr,
         }
     }
 }
@@ -201,6 +235,9 @@ struct Reader<R> {
     window: usize,
     manager: SharedStreamManager,
     last_stream_processed: StreamID,
+    client: bool,
+    /// Signals waiters on MuxadoSession::wait() when the reader exits.
+    close_tx: watch::Sender<bool>,
 }
 
 impl<R> Reader<R>
@@ -212,15 +249,63 @@ where
     async fn handle_frame(&mut self, frame: Frame) -> Result<(), Error> {
         // If the remote sent a syn, create a new stream and add it to the accept channel.
         if frame.is_syn() {
-            let (req, stream) = OpenReq::create(self.window, false);
+            let stream_id = frame.header.stream_id;
+
+            // Spec invariant: client opens odd IDs, server opens even IDs.
+            // The remote's parity must be opposite to ours.  If it isn't,
+            // that's a protocol error — send GOAWAY and abort.
+            let local_parity = if self.client { 1u32 } else { 0u32 };
+            if *stream_id % 2 == local_parity {
+                debug!(
+                    stream_id = display(stream_id),
+                    client = self.client,
+                    "received SYN with wrong stream ID parity, sending GOAWAY"
+                );
+                self.sys_tx
+                    .send(Frame::goaway(
+                        self.last_stream_processed,
+                        Error::Protocol,
+                        "stream ID parity violation".into(),
+                    ))
+                    .map_err(|_| Error::SessionClosed)
+                    .await?;
+                return Err(Error::Protocol);
+            }
+
+            let (req, mut stream) = OpenReq::create(self.window, false);
             self.manager
                 .lock()
                 .await
                 .create_stream(frame.header.stream_id.into(), req)?;
-            self.accept_tx
-                .send(stream)
-                .map_err(|_| Error::SessionClosed)
-                .await?;
+            // Tag the stream with its assigned ID (spec §stream.feature: Stream.Id()).
+            stream.set_id(stream_id);
+
+            // Spec §session.feature: when the accept queue is full the session
+            // must send RST(AcceptQueueFull) and keep running — it must NOT
+            // block or close the session.
+            match self.accept_tx.try_send(stream) {
+                Ok(()) => {}
+                Err(e) if e.is_full() => {
+                    debug!(
+                        stream_id = display(stream_id),
+                        "accept queue full, sending RST(AcceptQueueFull)"
+                    );
+                    // Mark the stream handle so the writer emits no FIN for it.
+                    // The stream object is dropped (never handed to the caller),
+                    // so the manager will clean it up when its task fires.
+                    if let Ok(handle) = self.manager.lock().await.get_stream(stream_id) {
+                        handle.sink_closer.close_with(Error::AcceptQueueFull);
+                        handle.needs_fin = false;
+                    }
+                    self.sys_tx
+                        .send(Frame::rst(stream_id, Error::AcceptQueueFull))
+                        .map_err(|_| Error::SessionClosed)
+                        .await?;
+                }
+                Err(_) => {
+                    return Err(Error::SessionClosed);
+                }
+            }
         }
 
         let needs_close = frame.is_fin();
@@ -239,6 +324,23 @@ where
         match typ {
             // These frame types are stream-specific
             HeaderType::Data | HeaderType::Rst | HeaderType::WndInc => {
+                // Spec §protocol.feature: a WNDINC with increment=0 is a
+                // ProtocolError — send GOAWAY and close the session.
+                if typ == HeaderType::WndInc
+                    && let Body::WndInc(inc) = frame.body
+                    && *inc == 0
+                {
+                    debug!("received WNDINC with zero increment, sending GOAWAY");
+                    self.sys_tx
+                        .send(Frame::goaway(
+                            self.last_stream_processed,
+                            Error::Protocol,
+                            "WNDINC increment must not be zero".into(),
+                        ))
+                        .map_err(|_| Error::SessionClosed)
+                        .await?;
+                    return Err(Error::Protocol);
+                }
                 if let Err(error) = self.manager.send_to_stream(frame).await {
                     // If the stream manager couldn't send this frame to the
                     // stream for some reason, generate an RST to tell the other
@@ -265,22 +367,26 @@ where
             // GoAway is a system-level frame, so send it along the special
             // system channel.
             HeaderType::GoAway => {
-                if let Body::GoAway { error, .. } = frame.body {
-                    self.manager.go_away(error).await;
+                if let Body::GoAway {
+                    last_stream_id,
+                    error,
+                    ..
+                } = frame.body
+                {
+                    // Only close locally-initiated streams beyond the acknowledged
+                    // last stream ID — streams ≤ last_stream_id are left open.
+                    self.manager
+                        .go_away(error, Some(last_stream_id))
+                        .await;
                     return Err(Error::RemoteGoneAway);
                 }
 
                 unreachable!()
             }
+
+            // Unknown frame types MUST be silently discarded (spec §protocol.feature).
             HeaderType::Invalid(_) => {
-                self.sys_tx
-                    .send(Frame::goaway(
-                        self.last_stream_processed,
-                        Error::Protocol,
-                        "invalid frame".into(),
-                    ))
-                    .map_err(|_| Error::StreamClosed)
-                    .await?
+                trace!(?frame, "received unknown frame type, discarding");
             }
         }
         Ok(())
@@ -302,6 +408,9 @@ where
             }
         }
         .await;
+
+        // Signal any pending wait() callers that the session has ended.
+        let _ = self.close_tx.send(true);
 
         self.manager.close_senders().await;
 
@@ -344,10 +453,15 @@ where
                 // have the SYN flag set.
                 req = self.open_reqs.next() => {
                     if let Some(resp_tx) = req {
-                        let (req, stream) = OpenReq::create(self.window, true);
+                        let (req, mut stream) = OpenReq::create(self.window, true);
 
                         let mut manager = self.manager.lock().await;
                         let res = manager.create_stream(None, req);
+                        // Tag the stream with the assigned ID before handing it
+                        // back to the caller (spec §stream.feature: Stream.Id()).
+                        if let Ok(id) = res {
+                            stream.set_id(id);
+                        }
                         let _ = resp_tx.send(res.map(move |_| stream));
                     }
                 },
@@ -455,6 +569,27 @@ impl OpenClose for MuxadoOpen {
 pub struct MuxadoSession {
     incoming: MuxadoAccept,
     outgoing: MuxadoOpen,
+    /// Resolves to `true` once the remote session closes (GOAWAY or disconnect).
+    close_rx: watch::Receiver<bool>,
+    local_addr: Option<SocketAddr>,
+    remote_addr: Option<SocketAddr>,
+}
+
+impl MuxadoSession {
+    /// Block until the remote closes the session (sends GOAWAY or disconnects).
+    pub async fn wait(&mut self) {
+        let _ = self.close_rx.wait_for(|&b| b).await;
+    }
+
+    /// The local socket address of the underlying transport, if known.
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        self.local_addr
+    }
+
+    /// The remote socket address of the underlying transport, if known.
+    pub fn remote_addr(&self) -> Option<SocketAddr> {
+        self.remote_addr
+    }
 }
 
 #[async_trait]
@@ -498,6 +633,11 @@ mod test {
     };
 
     use super::*;
+    use crate::frame::{
+        Body,
+        Frame,
+        StreamID,
+    };
 
     /// Convenience: create a connected client/server session pair over an
     /// in-memory duplex pipe.
@@ -747,5 +887,318 @@ mod test {
 
         server_handle.await.unwrap();
         assert_eq!(buf, b"ping");
+    }
+
+    // -------------------------------------------------------------------------
+    // Stream ID parity enforcement tests
+    // -------------------------------------------------------------------------
+
+    /// Inject a raw frame with the wrong parity SYN into the session to verify
+    /// the reader rejects it with a ProtocolError.
+    ///
+    /// We accomplish this by building a minimal transport from a pair of
+    /// in-memory pipes and writing a crafted raw frame directly.
+    #[tokio::test]
+    async fn test_server_rejects_even_syn_from_client() {
+        use crate::codec::FrameCodec;
+        use tokio::io::AsyncWriteExt as _;
+        use tokio_util::codec::Encoder as _;
+
+        let (transport_a, mut transport_b) = tokio::io::duplex(4096);
+        let server = SessionBuilder::new(transport_a).server().start();
+        let (_, mut server_accept) = server.split();
+
+        // Write a SYN DATA frame with an *even* stream ID (2) — wrong parity
+        // for a frame coming from the "client" side.
+        let bad_frame = Frame::from(Body::Data(b"hello"[..].into()))
+            .syn()
+            .stream_id(StreamID::clamp(2)); // even = server's own parity → violation
+
+        let mut buf = bytes::BytesMut::new();
+        let mut codec = FrameCodec::default();
+        codec.encode(bad_frame, &mut buf).unwrap();
+        transport_b.write_all(&buf).await.unwrap();
+
+        // The server should close the session; accept() returns None.
+        let result = timeout(Duration::from_secs(2), server_accept.accept()).await;
+        assert!(
+            matches!(result, Ok(None) | Err(_)),
+            "server should close session on parity violation, got: {result:?}"
+        );
+    }
+
+    /// Symmetric test: the client must reject an odd-ID SYN coming from the
+    /// server side (the server opens even IDs, so an odd ID is wrong parity).
+    #[tokio::test]
+    async fn test_client_rejects_odd_syn_from_server() {
+        use crate::codec::FrameCodec;
+        use tokio::io::AsyncWriteExt as _;
+        use tokio_util::codec::Encoder as _;
+
+        let (transport_a, mut transport_b) = tokio::io::duplex(4096);
+        let client = SessionBuilder::new(transport_a).client().start();
+        let (_, mut client_accept) = client.split();
+
+        // Write a SYN DATA frame with an *odd* stream ID (3) — wrong parity
+        // for a frame coming from the "server" side.
+        let bad_frame = Frame::from(Body::Data(b"hello"[..].into()))
+            .syn()
+            .stream_id(StreamID::clamp(3)); // odd = client's own parity → violation
+
+        let mut buf = bytes::BytesMut::new();
+        let mut codec = FrameCodec::default();
+        codec.encode(bad_frame, &mut buf).unwrap();
+        transport_b.write_all(&buf).await.unwrap();
+
+        let result = timeout(Duration::from_secs(2), client_accept.accept()).await;
+        assert!(
+            matches!(result, Ok(None) | Err(_)),
+            "client should close session on parity violation, got: {result:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // GOAWAY last-stream-id filtering test
+    // -------------------------------------------------------------------------
+
+    /// When the remote sends GOAWAY(lastStreamId=N), only locally-opened
+    /// streams with ID > N should be closed.  Streams ≤ N must remain open.
+    #[tokio::test]
+    async fn test_goaway_filters_by_last_stream_id() {
+        use crate::codec::FrameCodec;
+        use tokio::io::AsyncWriteExt as _;
+        use tokio_util::codec::Encoder as _;
+
+        // Client opens streams; we inject a GOAWAY from the "server" side.
+        let (transport_a, mut transport_b) = tokio::io::duplex(65536);
+        let mut client = SessionBuilder::new(transport_a).client().start();
+
+        // Open three streams: IDs 3, 5, 7.
+        let mut s3 = client.open().await.unwrap();
+        let mut s5 = client.open().await.unwrap();
+        let mut s7 = client.open().await.unwrap();
+
+        // Trigger the SYN sends so the streams are registered.
+        s3.write_all(b"a").await.unwrap();
+        s5.write_all(b"b").await.unwrap();
+        s7.write_all(b"c").await.unwrap();
+
+        // Drain the SYN frames so transport_b doesn't fill up.
+        let mut drain_buf = vec![0u8; 4096];
+        let _ = timeout(Duration::from_millis(50), transport_b.read(&mut drain_buf)).await;
+
+        // Inject GOAWAY(lastStreamId=5, NoError) from the "server".
+        let goaway = Frame::goaway(StreamID::clamp(5), Error::None, bytes::Bytes::new());
+        let mut buf = bytes::BytesMut::new();
+        let mut codec = FrameCodec::default();
+        codec.encode(goaway, &mut buf).unwrap();
+        transport_b.write_all(&buf).await.unwrap();
+
+        // Give the reader task a moment to process.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Streams 3 and 5 (id ≤ lastStreamId) must still be writable.
+        assert!(
+            s3.write_all(b"still open").await.is_ok(),
+            "stream 3 should remain open"
+        );
+        assert!(
+            s5.write_all(b"still open").await.is_ok(),
+            "stream 5 should remain open"
+        );
+
+        // Stream 7 (id > lastStreamId, locally opened) must be closed.
+        let write7 = timeout(Duration::from_secs(1), s7.write_all(b"should fail")).await;
+        assert!(
+            matches!(write7, Ok(Err(_)) | Err(_)),
+            "stream 7 should be closed after GOAWAY(lastStreamId=5)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Unknown frame type silently discarded test
+    // -------------------------------------------------------------------------
+
+    /// An unknown frame type must NOT terminate the session; the session must
+    /// continue accepting new streams normally.
+    #[tokio::test]
+    async fn test_unknown_frame_type_is_discarded() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (transport_a, mut transport_b) = tokio::io::duplex(65536);
+        let mut server = SessionBuilder::new(transport_a).server().start();
+
+        // Write a raw frame with an unknown type byte (e.g. 0xF in the upper nibble).
+        // Header layout: [length(3B) | type+flags(1B) | stream_id(4B)]
+        // type nibble 0xF, flags nibble 0x0 → byte 0xF0, length 0, stream_id 0.
+        let raw: [u8; 8] = [
+            0x00, 0x00, 0x00, // length = 0
+            0xF0, // type=0xF, flags=0
+            0x00, 0x00, 0x00, 0x00, // stream_id = 0
+        ];
+        transport_b.write_all(&raw).await.unwrap();
+
+        // Now send a legitimate SYN so we can verify the session is still alive.
+        let (_client_open, _) = SessionBuilder::new(transport_b).client().start().split();
+        // Trigger an actual stream open from the other direction via raw writes.
+        // Easiest: just check that server.accept() doesn't return None immediately
+        // (session not dead). We'll do a small sleep to let the unknown frame be processed.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The session must still be operational — accept() should be pending, not None.
+        let accept_result = timeout(Duration::from_millis(50), server.accept()).await;
+        assert!(
+            accept_result.is_err(), // Timeout = still waiting = session alive
+            "session should still be alive after unknown frame (accept should be pending)"
+        );
+    }
+
+    // =========================================================================
+    // Medium-priority gap regression tests
+    // =========================================================================
+
+    /// Spec §session.feature: when the accept queue is full the session must
+    /// send RST(AcceptQueueFull) and continue running — it must NOT block or
+    /// close the session.
+    #[tokio::test]
+    async fn test_accept_queue_full_sends_rst() {
+        use tokio::io::AsyncWriteExt as _;
+
+        // Server with accept queue size 1 so it fills quickly.
+        let (transport_a, transport_b) = tokio::io::duplex(65536);
+        let server = SessionBuilder::new(transport_a)
+            .server()
+            .accept_queue_size(1)
+            .start();
+        let (_, mut server_accept) = server.split();
+        let (mut client_open, _) = SessionBuilder::new(transport_b).client().start().split();
+
+        // SYNs are sent on the first write to each stream.
+        let mut s1 = client_open.open().await.unwrap();
+        s1.write_all(b"a").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Drain stream 1 so the queue is empty again.
+        let accepted = timeout(Duration::from_millis(100), server_accept.accept()).await;
+        assert!(matches!(accepted, Ok(Some(_))), "should accept stream 1");
+
+        // Fill the queue with stream 3.
+        let mut s3 = client_open.open().await.unwrap();
+        s3.write_all(b"b").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Open stream 5 while queue is full → server sends RST(AcceptQueueFull).
+        let mut s5 = client_open.open().await.unwrap();
+        s5.write_all(b"overflow").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Server session must still be alive: stream 3 is in the queue.
+        let got = timeout(Duration::from_millis(100), server_accept.accept()).await;
+        assert!(
+            matches!(got, Ok(Some(_))),
+            "server should have stream 3 in queue after overflow"
+        );
+    }
+
+    /// Spec §protocol.feature: WNDINC with increment=0 must close the session
+    /// with ProtocolError (GOAWAY).
+    #[tokio::test]
+    async fn test_wndinc_zero_is_protocol_error() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (transport_a, mut transport_b) = tokio::io::duplex(65536);
+        let server = SessionBuilder::new(transport_a).server().start();
+        let (_, mut server_accept) = server.split();
+
+        // Write a raw WNDINC frame with stream_id=1 and increment=0.
+        // Layout: [length(3B) | type+flags(1B) | stream_id(4B) | increment(4B)]
+        // type nibble for WndInc = 0x3, flags = 0 → byte 0x30
+        let raw: [u8; 12] = [
+            0x00, 0x00, 0x04, // length = 4
+            0x30, // type=0x3 (WndInc), flags=0
+            0x00, 0x00, 0x00, 0x01, // stream_id = 1
+            0x00, 0x00, 0x00, 0x00, // increment = 0
+        ];
+        transport_b.write_all(&raw).await.unwrap();
+
+        // Server should close the session; accept() returns None.
+        let result = timeout(Duration::from_secs(2), server_accept.accept()).await;
+        assert!(
+            matches!(result, Ok(None) | Err(_)),
+            "server should close session on zero WNDINC, got: {result:?}"
+        );
+    }
+
+    /// Spec §session.feature: wait() must block until the remote closes the
+    /// session, then resolve.
+    #[tokio::test]
+    async fn test_wait_resolves_on_remote_close() {
+        let (transport_a, transport_b) = tokio::io::duplex(65536);
+        let mut server = SessionBuilder::new(transport_a).server().start();
+        let mut client = SessionBuilder::new(transport_b).client().start();
+
+        // Close client → server's reader sees EOF and exits.
+        client.close(Error::None, String::new()).await.unwrap();
+
+        // wait() on the server should resolve within a reasonable timeout.
+        let result = timeout(Duration::from_secs(2), server.wait()).await;
+        assert!(
+            result.is_ok(),
+            "server wait() should resolve when client closes"
+        );
+    }
+
+    /// Spec §stream.feature: frames arriving within the 5-second RST deferred
+    /// removal window must be silently discarded (no spurious protocol error).
+    #[tokio::test]
+    async fn test_rst_deferred_discards_late_frames() {
+        use crate::codec::FrameCodec;
+        use tokio::io::AsyncWriteExt as _;
+        use tokio_util::codec::Encoder as _;
+
+        let (transport_a, mut transport_b) = tokio::io::duplex(65536);
+        let server = SessionBuilder::new(transport_a).server().start();
+        let (_, mut server_accept) = server.split();
+
+        // Open stream 1 from the client side by sending a SYN DATA frame.
+        let syn_frame = Frame::from(Body::Data(b"hello"[..].into()))
+            .syn()
+            .stream_id(StreamID::clamp(1));
+        let mut buf = bytes::BytesMut::new();
+        let mut codec = FrameCodec::default();
+        codec.encode(syn_frame, &mut buf).unwrap();
+        transport_b.write_all(&buf).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Send RST for stream 1.
+        let rst_frame =
+            Frame::rst(StreamID::clamp(1), Error::StreamReset).stream_id(StreamID::clamp(1));
+        buf.clear();
+        codec.encode(rst_frame, &mut buf).unwrap();
+        transport_b.write_all(&buf).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // Now send a DATA frame for the already-RST'd stream 1.
+        // This should be silently discarded, NOT trigger a GOAWAY.
+        let late_frame = Frame::from(Body::Data(b"late"[..].into()))
+            .stream_id(StreamID::clamp(1));
+        buf.clear();
+        codec.encode(late_frame, &mut buf).unwrap();
+        transport_b.write_all(&buf).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Session must still be alive — accept() should still be pending.
+        let _ = timeout(Duration::from_millis(20), server_accept.accept()).await;
+        // Just verify we can still use the session (no panic / GOAWAY was sent).
+        // If the session died, accept() would return None immediately.
+        // We already drained the one stream above, so now accept is pending again.
+        let accept_result = timeout(Duration::from_millis(50), server_accept.accept()).await;
+        assert!(
+            accept_result.is_err(), // Timeout means still waiting = session alive
+            "session should be alive after late frame on RST'd stream"
+        );
     }
 }

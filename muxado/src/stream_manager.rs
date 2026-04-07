@@ -13,6 +13,10 @@ use std::{
         Poll,
         Waker,
     },
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use futures::{
@@ -88,12 +92,20 @@ pub struct StreamManager {
 
     gone_away: bool,
 
+    // true if this end is the muxado "client" (opens odd-numbered stream IDs).
+    client: bool,
+
     // If we run out of streams to poll, the task collection will be put to
     // sleep. We can't immediately poll it when we add a new stream since that
     // may lose a frame. Instead, the poll_next implementation will store its
     // waker here, and we'll wake it up in create_stream to get it polling
     // again.
     new_streams: Option<Waker>,
+
+    // Spec §stream.feature: after a stream is RST'd (sent or received) its ID
+    // is kept in this map for 5 seconds so that late-arriving frames are
+    // silently discarded rather than causing spurious protocol errors.
+    rst_streams: HashMap<StreamID, Instant>,
 }
 
 impl StreamManager {
@@ -123,7 +135,9 @@ impl StreamManager {
             last_remote_id: StreamID::clamp(last_remote_id),
             tasks: Default::default(),
             gone_away: false,
+            client,
             new_streams: None,
+            rst_streams: Default::default(),
         }
     }
 
@@ -137,10 +151,42 @@ impl StreamManager {
         )
     }
 
-    pub fn go_away(&mut self, error: Error) {
-        self.gone_away = true;
-        for (_id, handle) in self.streams.drain() {
-            handle.sink_closer.close_with(error);
+    /// Close streams on a GOAWAY event.
+    ///
+    /// When `last_stream_id` is `None` (local close / full shutdown) all
+    /// streams are closed and the session is marked terminated.
+    /// When it is `Some(id)` (received remote GOAWAY) only locally-initiated
+    /// streams whose ID is greater than `id` are closed; streams already
+    /// acknowledged by the remote are left open and the writer keeps running.
+    pub fn go_away(&mut self, error: Error, last_stream_id: Option<StreamID>) {
+        match last_stream_id {
+            None => {
+                self.gone_away = true;
+                for (_id, handle) in self.streams.drain() {
+                    handle.sink_closer.close_with(error);
+                }
+            }
+            Some(last_id) => {
+                // Client opens odd IDs (parity 1); server opens even IDs (parity 0).
+                let local_parity = if self.client { 1u32 } else { 0u32 };
+                // SinkCloser uses 0 as "open" sentinel, so we must never close
+                // with Error::None (= 0).  RemoteGoneAway is always non-zero.
+                let close_error = if error == Error::None {
+                    Error::RemoteGoneAway
+                } else {
+                    error
+                };
+                self.streams.retain(|&id, handle| {
+                    let is_local = *id % 2 == local_parity;
+                    let beyond_last = *id > *last_id;
+                    if is_local && beyond_last {
+                        handle.sink_closer.close_with(close_error);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
     }
 
@@ -197,7 +243,7 @@ impl StreamT for StreamManager {
                 *last_stream_id = self.last_remote_id;
                 // We won't be sending any more frames from streams.
                 self.as_mut().tasks().clear();
-                self.as_mut().go_away(Error::SessionClosed);
+                self.as_mut().go_away(Error::SessionClosed, None);
             }
             return Some(frame).into();
         }
@@ -226,7 +272,10 @@ impl StreamT for StreamManager {
         // away.
         if handle.sink_closer.is_closed() && !handle.needs_fin {
             debug!(needs_fin = handle.needs_fin, "removing stream without fin");
-            self.remove_stream(id);
+            // Use RST-deferred removal so that late-arriving frames for this
+            // stream ID are silently discarded for 5 seconds instead of
+            // triggering a spurious protocol error.
+            self.remove_stream_rst(id);
             cx.waker().wake_by_ref();
             return Poll::Pending;
         }
@@ -282,9 +331,14 @@ impl StreamT for SharedStreamManager {
 
 impl SharedStreamManager {
     #[instrument(level = "trace", skip(self))]
-    pub async fn go_away(&mut self, error: Error) {
-        self.1.store(true, Ordering::SeqCst);
-        self.lock().await.go_away(error);
+    pub async fn go_away(&mut self, error: Error, last_stream_id: Option<StreamID>) {
+        // Only mark terminated (stopping the writer) on a local full shutdown.
+        // A received remote GOAWAY only closes specific streams; the writer
+        // keeps running to drain traffic on surviving streams.
+        if last_stream_id.is_none() {
+            self.1.store(true, Ordering::SeqCst);
+        }
+        self.lock().await.go_away(error, last_stream_id);
     }
 
     // Send a frame to a stream with the given ID.
@@ -378,10 +432,17 @@ impl SharedStreamManager {
             let mut lock = ready!(self.0.poll_lock(cx));
             let handle = match lock.get_stream(id) {
                 Ok(handle) => handle,
-                Err(_e) if HeaderType::Data != typ || is_fin => {
-                    return Ok(()).into();
+                Err(_) => {
+                    // Spec §stream.feature: frames arriving within the 5-second
+                    // RST deferred-removal window must be silently discarded.
+                    if lock.is_rst_stream(id) {
+                        return Ok(()).into();
+                    }
+                    if HeaderType::Data != typ || is_fin {
+                        return Ok(()).into();
+                    }
+                    return Err(Error::StreamClosed).into();
                 }
-                Err(e) => return Err(e).into(),
             };
 
             let res = ready!(handle_frame(handle, cx));
@@ -444,6 +505,26 @@ impl StreamManager {
             trace!("stream not found");
             Err(Error::StreamClosed)
         }
+    }
+
+    /// Returns `true` if `id` belongs to a recently-RST'd stream that is
+    /// still within the 5-second deferred-removal window.  Expired entries
+    /// are pruned lazily on each call.
+    pub(crate) fn is_rst_stream(&mut self, id: StreamID) -> bool {
+        let now = Instant::now();
+        self.rst_streams.retain(|_, expiry| *expiry > now);
+        self.rst_streams.contains_key(&id)
+    }
+
+    /// Remove `id` from the live streams map and add it to the RST deferred
+    /// window so that late-arriving frames are silently discarded for 5 s.
+    fn remove_stream_rst(&mut self, id: StreamID) -> Option<StreamHandle> {
+        let handle = self.streams.remove(&id);
+        if handle.is_some() {
+            self.rst_streams
+                .insert(id, Instant::now() + Duration::from_secs(5));
+        }
+        handle
     }
 
     #[instrument(level = "trace", skip(self, req))]

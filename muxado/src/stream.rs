@@ -32,6 +32,7 @@ use crate::{
         Frame,
         HeaderType,
         Length,
+        StreamID,
         WndInc,
     },
     stream_output::StreamSender,
@@ -66,6 +67,9 @@ pub struct Stream {
     data_read_closed: bool,
 
     needs_syn: bool,
+
+    /// The muxado stream ID assigned by the session.
+    stream_id: StreamID,
 }
 
 impl fmt::Debug for Stream {
@@ -99,7 +103,17 @@ impl Stream {
             write_closed: Default::default(),
             data_read_closed: false,
             needs_syn,
+            stream_id: StreamID::clamp(0),
         }
+    }
+
+    /// Returns the stream's muxado stream ID.
+    pub fn id(&self) -> StreamID {
+        self.stream_id
+    }
+
+    pub(crate) fn set_id(&mut self, id: StreamID) {
+        self.stream_id = id;
     }
 
     #[instrument(level = "trace", skip_all)]

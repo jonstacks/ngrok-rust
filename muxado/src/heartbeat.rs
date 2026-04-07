@@ -157,13 +157,20 @@ where
 
 impl HeartbeatCtl {
     /// Explicitly request a heartbeat and return the latency.
+    ///
+    /// Returns an error if the heartbeat response is not received within the
+    /// configured tolerance.
     pub async fn beat(&self) -> Result<Duration, io::Error> {
         let (tx, rx) = oneshot::channel();
         self.on_demand
             .send(tx)
             .await
             .map_err(|_| io::ErrorKind::NotConnected)?;
-        rx.await.map_err(|_| io::ErrorKind::ConnectionReset.into())
+        let (_, tolerance) = get_durations(&self.durations);
+        tokio::time::timeout(tolerance, rx)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "heartbeat timeout"))?
+            .map_err(|_| io::ErrorKind::ConnectionReset.into())
     }
 
     /// Change the heartbeat interval.
@@ -199,25 +206,23 @@ impl HeartbeatCtl {
                                 if let Some(cb) = cb.as_ref() {
                                     cb.handle_heartbeat(None).await?;
                                 }
+                                // Spec §heartbeat.feature: do NOT reset the deadline
+                                // after a timeout.  If the callback does not terminate
+                                // the session, subsequent timeouts fire immediately,
+                                // which is the intended spec behaviour.
                             }
                             Ok(Some(lat)) => {
                                 if let Some(cb) = cb.as_ref() {
                                     cb.handle_heartbeat(lat.into()).await?;
                                 }
+                                // Successful heartbeat: advance the deadline.
+                                (interval, tolerance) = get_durations(&durations);
+                                deadline = tokio::time::Instant::now() + interval + tolerance;
                             }
                             Ok(None) => {
                                 return Result::<(), Box<dyn StdError>>::Ok(());
                             }
                         };
-
-                        // Slight divergence from Go implementation: this didn't
-                        // previously happen in the "timeout" case, which did noting but
-                        // the callback. Presumably, this usually killed the connection,
-                        // causing the goroutine to exit *anyway*. If we didn't reset
-                        // the deadline here, it would timeout immediately rather than
-                        // blocking indefinitely as in Go.
-                        (interval, tolerance) = get_durations(&durations);
-                        deadline = tokio::time::Instant::now() + interval + tolerance;
                     }
                 }
                 .boxed(),
@@ -238,13 +243,31 @@ impl HeartbeatCtl {
         mark: mpsc::Sender<Duration>,
         drop_waiter: awaitdrop::WaitFuture,
     ) -> Result<(), io::Error> {
-        let (interval, _) = self.get_durations();
-        let mut ticker = tokio::time::interval(interval);
+        let (initial_interval, _) = self.get_durations();
+        let durations = self.durations.clone();
 
         tokio::spawn(
             select(
                 async move {
+                    // The ticker is recreated whenever set_interval() changes the
+                    // stored duration.  We detect changes by comparing against
+                    // current_interval on every loop iteration.
+                    let mut current_interval = initial_interval;
+                    let mut ticker = tokio::time::interval(initial_interval);
+
                     loop {
+                        // Spec §heartbeat.feature: SetInterval() must update the
+                        // running ticker — recreate it with the new period so the
+                        // next heartbeat fires at now + new_interval.
+                        let (new_interval, _) = get_durations(&durations);
+                        if new_interval != current_interval {
+                            current_interval = new_interval;
+                            ticker = tokio::time::interval_at(
+                                tokio::time::Instant::now() + new_interval,
+                                new_interval,
+                            );
+                        }
+
                         let mut resp_chan: Option<oneshot::Sender<Duration>> = None;
 
                         select! {
