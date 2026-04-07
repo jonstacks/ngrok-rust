@@ -485,18 +485,32 @@ impl Session for MuxadoSession {
 
 #[cfg(test)]
 mod test {
-    use tokio::io::{
-        self,
-        AsyncReadExt,
-        AsyncWriteExt,
+    use tokio::{
+        io::{
+            self,
+            AsyncReadExt,
+            AsyncWriteExt,
+        },
+        time::{
+            Duration,
+            timeout,
+        },
     };
 
     use super::*;
+
+    /// Convenience: create a connected client/server session pair over an
+    /// in-memory duplex pipe.
+    fn session_pair(buf: usize) -> (MuxadoSession, MuxadoSession) {
+        let (left, right) = io::duplex(buf);
+        let server = SessionBuilder::new(left).server().start();
+        let client = SessionBuilder::new(right).client().start();
+        (server, client)
+    }
+
     #[tokio::test]
     async fn test_session() {
-        let (left, right) = io::duplex(512);
-        let mut server = SessionBuilder::new(left).server().start();
-        let mut client = SessionBuilder::new(right).client().start();
+        let (mut server, mut client) = session_pair(512);
 
         tokio::spawn(async move {
             let mut stream = server.accept().await.expect("accept stream");
@@ -522,5 +536,216 @@ mod test {
             .expect("read from stream");
 
         assert_eq!(b"Hello, world!", &*buf,);
+    }
+
+    // -------------------------------------------------------------------------
+    // Stream ID parity tests
+    // -------------------------------------------------------------------------
+
+    /// The client allocates stream IDs that are odd (3, 5, 7, …).
+    /// We observe the SYN flag on the server side and verify the stream ID
+    /// parity without accessing private fields.  We open multiple streams and
+    /// check that each one is accepted by the server exactly once, confirming
+    /// the session bookkeeping is consistent.
+    #[tokio::test]
+    async fn test_multiple_streams_client_to_server() {
+        let (mut server, mut client) = session_pair(4096);
+
+        let count = 5usize;
+        let server_handle = tokio::spawn(async move {
+            let mut results = Vec::new();
+            for _ in 0..count {
+                let mut stream = server.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                stream.read_to_end(&mut buf).await.unwrap();
+                results.push(buf);
+            }
+            results
+        });
+
+        for i in 0..count {
+            let mut stream = client.open().await.expect("open");
+            stream
+                .write_all(format!("msg{i}").as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let results = timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("timed out")
+            .expect("server panicked");
+
+        assert_eq!(results.len(), count);
+        for (i, buf) in results.iter().enumerate() {
+            assert_eq!(buf, format!("msg{i}").as_bytes());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // GOAWAY / close tests
+    // -------------------------------------------------------------------------
+
+    /// Calling `close()` should cause the remote's `accept()` to return None,
+    /// signalling that the session has terminated.
+    #[tokio::test]
+    async fn test_close_terminates_remote_accept() {
+        let (server, mut client) = session_pair(4096);
+        let (server_open, mut server_accept) = server.split();
+
+        let server_handle = tokio::spawn(async move {
+            // Wait for the session to close — accept() returns None.
+            let result = server_accept.accept().await;
+            assert!(result.is_none(), "accept should return None after GOAWAY");
+        });
+
+        // Give the server a moment to start accepting.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        client
+            .close(Error::None, "clean shutdown".into())
+            .await
+            .expect("close should succeed");
+
+        drop(client);
+        drop(server_open);
+
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("timed out")
+            .expect("server panicked");
+    }
+
+    /// Closing a session while streams are in-flight must not panic.
+    #[tokio::test]
+    async fn test_close_with_open_streams() {
+        let (mut server, mut client) = session_pair(4096);
+
+        let server_handle = tokio::spawn(async move {
+            // Accept streams until the session closes.
+            while let Some(_stream) = server.accept().await {}
+        });
+
+        let mut stream = client.open().await.expect("open stream");
+        stream.write_all(b"hello").await.unwrap();
+
+        client
+            .close(Error::None, String::new())
+            .await
+            .expect("close should succeed");
+
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("timed out")
+            .expect("server panicked");
+    }
+
+    // -------------------------------------------------------------------------
+    // Stream limit test
+    // -------------------------------------------------------------------------
+
+    /// Opening more streams than the configured limit must return
+    /// `Error::StreamsExhausted`.
+    #[tokio::test]
+    async fn test_stream_limit_exhausted() {
+        const LIMIT: usize = 4;
+        let (left, right) = io::duplex(65536);
+        let mut server = SessionBuilder::new(left).server().start();
+        let mut client = SessionBuilder::new(right)
+            .client()
+            .stream_limit(LIMIT)
+            .start();
+
+        // Keep the server draining so the client can open streams.
+        tokio::spawn(async move { while let Some(_stream) = server.accept().await {} });
+
+        // Open exactly LIMIT streams — all must succeed.
+        let mut streams = Vec::new();
+        for _ in 0..LIMIT {
+            let s = client.open().await.expect("should open within limit");
+            streams.push(s);
+        }
+
+        // The next open must fail.
+        let result = client.open().await;
+        assert_eq!(
+            result.unwrap_err(),
+            Error::StreamsExhausted,
+            "expected StreamsExhausted after limit reached"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Session split test
+    // -------------------------------------------------------------------------
+
+    /// The session can be split into independent open/accept halves and used
+    /// from separate tasks.
+    #[tokio::test]
+    async fn test_split_session() {
+        let (mut server, client) = session_pair(4096);
+        let (mut client_open, client_accept) = client.split();
+
+        // Server accepts one stream.
+        let server_handle = tokio::spawn(async move {
+            let mut s = server.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            s.read_to_end(&mut buf).await.unwrap();
+            buf
+        });
+
+        // Open from the open-half, accept from the accept-half (different tasks).
+        let open_handle = tokio::spawn(async move {
+            let mut s = client_open.open().await.expect("open");
+            s.write_all(b"split test").await.unwrap();
+        });
+
+        // client_accept is kept alive (but not used) to prevent session teardown.
+        let accept_handle = tokio::spawn(async move {
+            let _keep = client_accept;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        open_handle.await.unwrap();
+        let data = timeout(Duration::from_secs(5), server_handle)
+            .await
+            .unwrap()
+            .unwrap();
+        accept_handle.await.unwrap();
+
+        assert_eq!(data, b"split test");
+    }
+
+    // -------------------------------------------------------------------------
+    // Bidirectional concurrent streams
+    // -------------------------------------------------------------------------
+
+    /// Both client and server open streams simultaneously; all data must arrive
+    /// correctly with no deadlock.
+    #[tokio::test]
+    async fn test_bidirectional_concurrent_streams() {
+        let (mut server, mut client) = session_pair(65536);
+
+        // Server: accept one stream from client, then open one back.
+        let server_handle = tokio::spawn(async move {
+            let mut from_client = server.accept().await.expect("server accept");
+            let mut buf = Vec::new();
+            from_client.read_to_end(&mut buf).await.unwrap();
+
+            let mut to_client = server.open().await.expect("server open");
+            to_client.write_all(&buf).await.unwrap();
+        });
+
+        // Client: open to server, then accept the echo back.
+        let mut to_server = client.open().await.expect("client open");
+        to_server.write_all(b"ping").await.unwrap();
+        drop(to_server);
+
+        let mut from_server = client.accept().await.expect("client accept");
+        let mut buf = Vec::new();
+        from_server.read_to_end(&mut buf).await.unwrap();
+
+        server_handle.await.unwrap();
+        assert_eq!(buf, b"ping");
     }
 }

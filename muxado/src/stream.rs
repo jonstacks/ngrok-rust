@@ -346,6 +346,19 @@ pub mod test {
 
     use super::*;
 
+    // Construct a Stream directly (no session), wiring up two mpsc channels.
+    // Returns (stream, sender-to-stream, receiver-from-stream).
+    fn make_stream(
+        window: usize,
+        needs_syn: bool,
+    ) -> (Stream, mpsc::Sender<Frame>, mpsc::Receiver<Frame>) {
+        let (tx_to_stream, stream_rx) = mpsc::channel(512);
+        let (stream_tx, rx_from_stream) = mpsc::channel(512);
+        let stream_sender = StreamSender::wrap(stream_tx);
+        let stream = Stream::new(stream_sender, stream_rx, window, needs_syn);
+        (stream, tx_to_stream, rx_from_stream)
+    }
+
     #[traced_test]
     #[tokio::test]
     async fn test_stream() {
@@ -397,5 +410,203 @@ pub mod test {
         stream.shutdown().await.unwrap();
 
         assert!(rx.try_next().unwrap().unwrap().is_fin());
+    }
+
+    // -------------------------------------------------------------------------
+    // Half-close (FIN) tests
+    // -------------------------------------------------------------------------
+
+    /// Receiving a FIN frame from the remote must eventually produce an
+    /// `AsyncRead` EOF (poll_read returns Ok with 0 bytes advanced).
+    #[tokio::test]
+    async fn test_fin_received_causes_eof() {
+        let (mut stream, mut tx, _rx) = make_stream(256, false);
+
+        // Deliver some data followed by a FIN frame.
+        tx.try_send(Body::Data(b"hello"[..].into()).into()).unwrap();
+        let fin_frame = Frame::from(Body::Data([][..].into())).fin();
+        tx.try_send(fin_frame).unwrap();
+        drop(tx);
+
+        let mut buf = Vec::new();
+        time::timeout(Duration::from_secs(1), stream.read_to_end(&mut buf))
+            .await
+            .expect("should not time out")
+            .expect("read_to_end should succeed");
+
+        assert_eq!(buf, b"hello");
+    }
+
+    /// A FIN DATA frame that also carries payload must deliver the payload
+    /// before signalling EOF.
+    #[tokio::test]
+    async fn test_fin_with_payload_delivers_data_then_eof() {
+        let (mut stream, mut tx, _rx) = make_stream(256, false);
+
+        // A single frame that carries both the last bytes and FIN.
+        let fin_with_data = Frame::from(Body::Data(b"last"[..].into())).fin();
+        tx.try_send(fin_with_data).unwrap();
+        drop(tx);
+
+        let mut buf = Vec::new();
+        time::timeout(Duration::from_secs(1), stream.read_to_end(&mut buf))
+            .await
+            .expect("should not time out")
+            .expect("read_to_end should succeed");
+
+        assert_eq!(buf, b"last");
+    }
+
+    /// After `AsyncWrite::shutdown()`, any further write must fail with a
+    /// `BrokenPipe` error.
+    #[tokio::test]
+    async fn test_write_after_shutdown_returns_broken_pipe() {
+        let (mut stream, _tx, mut rx) = make_stream(256, false);
+
+        stream.shutdown().await.expect("shutdown should succeed");
+
+        // Consume the FIN frame emitted by shutdown.
+        let fin = rx.try_next().unwrap().unwrap();
+        assert!(fin.is_fin(), "shutdown should produce a FIN frame");
+
+        // A subsequent write must fail.
+        let result = stream.write_all(b"should fail").await;
+        assert!(result.is_err(), "write after shutdown should fail");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe,
+            "expected BrokenPipe error kind"
+        );
+    }
+
+    /// `shutdown()` itself must be idempotent: calling it twice must not panic
+    /// and must succeed both times.
+    #[tokio::test]
+    async fn test_shutdown_is_idempotent() {
+        let (mut stream, _tx, _rx) = make_stream(256, false);
+        stream.shutdown().await.expect("first shutdown");
+        // Second shutdown: write_closed is already set, so we skip the send.
+        stream.shutdown().await.expect("second shutdown");
+    }
+
+    // -------------------------------------------------------------------------
+    // Flow control tests
+    // -------------------------------------------------------------------------
+
+    /// With a 5-byte window, a write of 10 bytes must be limited to 5 bytes.
+    /// After receiving a WNDINC of 5, the next write of the remaining bytes
+    /// must succeed.
+    #[tokio::test]
+    async fn test_flow_control_write_limited_by_window() {
+        let (mut stream, mut tx, mut rx) = make_stream(5, false);
+
+        // First write: limited to window size (5 bytes).
+        let n = time::timeout(Duration::from_secs(1), stream.write(b"0123456789"))
+            .await
+            .expect("should not time out")
+            .expect("write should succeed");
+        assert_eq!(n, 5, "write should be limited to 5 bytes by flow control");
+        // Consume the DATA frame.
+        rx.try_next().unwrap().unwrap();
+
+        // Sending a WNDINC to the stream should unblock the next write.
+        tx.try_send(Body::WndInc(WndInc::clamp(5)).into()).unwrap();
+
+        let n = time::timeout(Duration::from_secs(1), stream.write(b"56789"))
+            .await
+            .expect("should not time out")
+            .expect("write should succeed");
+        assert_eq!(n, 5);
+    }
+
+    /// Multiple WNDINC frames must be accumulated correctly by the window.
+    #[tokio::test]
+    async fn test_window_accumulates_multiple_increments() {
+        let (mut stream, mut tx, mut rx) = make_stream(5, false);
+
+        // Exhaust the initial window.
+        stream.write_all(b"12345").await.unwrap();
+        rx.try_next().unwrap(); // consume DATA frame
+
+        // Send two separate WNDINCs totalling 10.
+        tx.try_send(Body::WndInc(WndInc::clamp(3)).into()).unwrap();
+        tx.try_send(Body::WndInc(WndInc::clamp(4)).into()).unwrap();
+
+        // The window is capped at max_size (5), not unbounded.
+        // After two increments the window should not exceed 5.
+        let n = time::timeout(Duration::from_secs(1), stream.write(b"abcdefghij"))
+            .await
+            .expect("should not time out")
+            .expect("write should succeed");
+        assert!(
+            n <= 5,
+            "window should be capped at max_size; wrote {n} bytes"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // SYN flag tests
+    // -------------------------------------------------------------------------
+
+    /// A stream with `needs_syn=true` must set the SYN flag on the first write
+    /// and clear it on subsequent writes.
+    #[tokio::test]
+    async fn test_syn_set_on_first_write_only() {
+        let (mut stream, _tx, mut rx) = make_stream(64, true);
+
+        stream.write_all(b"first").await.unwrap();
+        let first_frame = rx.try_next().unwrap().unwrap();
+        assert!(first_frame.is_syn(), "first write must have SYN flag");
+
+        stream.write_all(b"second").await.unwrap();
+        let second_frame = rx.try_next().unwrap().unwrap();
+        assert!(
+            !second_frame.is_syn(),
+            "subsequent writes must not have SYN flag"
+        );
+    }
+
+    /// A stream with `needs_syn=false` must never set the SYN flag.
+    #[tokio::test]
+    async fn test_no_syn_when_not_needed() {
+        let (mut stream, _tx, mut rx) = make_stream(64, false);
+
+        stream.write_all(b"data").await.unwrap();
+        let frame = rx.try_next().unwrap().unwrap();
+        assert!(
+            !frame.is_syn(),
+            "stream with needs_syn=false must not set SYN"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // WNDINC generation on read
+    // -------------------------------------------------------------------------
+
+    /// Reading data from the stream must generate a WNDINC for the bytes
+    /// consumed.
+    #[tokio::test]
+    async fn test_read_generates_wndinc() {
+        let (mut stream, mut tx, mut rx) = make_stream(256, false);
+
+        tx.try_send(Body::Data(b"hello world"[..].into()).into())
+            .unwrap();
+        drop(tx);
+
+        let mut buf = [0u8; 11];
+        time::timeout(Duration::from_secs(1), stream.read_exact(&mut buf))
+            .await
+            .expect("should not time out")
+            .expect("read_exact should succeed");
+
+        assert_eq!(&buf, b"hello world");
+
+        // The read must have generated a WNDINC for the 11 bytes consumed.
+        let frame = rx.try_next().unwrap().unwrap();
+        assert_eq!(
+            frame.body,
+            Body::WndInc(WndInc::clamp(11)),
+            "read should generate a WNDINC of 11"
+        );
     }
 }

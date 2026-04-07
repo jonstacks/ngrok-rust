@@ -107,3 +107,88 @@ impl From<InvalidHeader> for Error {
         Error::Protocol
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::frame::ErrorCode;
+
+    #[test]
+    fn all_known_error_codes_round_trip() {
+        use Error::*;
+        let known = [
+            (0x00u32, None),
+            (0x01, Protocol),
+            (0x02, Internal),
+            (0x03, FlowControl),
+            (0x04, StreamClosed),
+            (0x05, StreamRefused),
+            (0x06, StreamCancelled),
+            (0x07, StreamReset),
+            (0x08, FrameSizeError),
+            (0x09, AcceptQueueFull),
+            (0x0A, EnhanceYourCalm),
+            (0x0B, RemoteGoneAway),
+            (0x0C, StreamsExhausted),
+            (0x0D, WriteTimeout),
+            (0x0E, SessionClosed),
+            (0x0F, PeerEOF),
+        ];
+
+        for (code, variant) in known {
+            let ec = ErrorCode::mask(code);
+            let err: Error = ec.into();
+            assert_eq!(err, variant, "code {code:#04x} should map to {variant:?}");
+
+            let ec_back = ErrorCode::from(variant);
+            assert_eq!(
+                *ec_back, code,
+                "{variant:?} should encode back to {code:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_error_codes_map_to_error_unknown() {
+        // Codes 0x10 through 0xFE are not defined and must map to ErrorUnknown.
+        for code in [0x10u32, 0xFF, 0x1234, 0xDEAD_BEEF, u32::MAX - 1] {
+            let err: Error = ErrorCode::mask(code).into();
+            assert_eq!(
+                err,
+                Error::ErrorUnknown,
+                "code {code:#010x} should map to ErrorUnknown"
+            );
+        }
+    }
+
+    #[test]
+    fn error_unknown_encodes_as_u32_max() {
+        let ec = ErrorCode::from(Error::ErrorUnknown);
+        assert_eq!(*ec, u32::MAX, "ErrorUnknown should encode as u32::MAX");
+    }
+
+    #[test]
+    fn invalid_header_converts_to_protocol_error() {
+        let variants: &[InvalidHeader] = &[
+            InvalidHeader::ZeroStreamID,
+            InvalidHeader::NonZeroStreamID(StreamID::clamp(1)),
+            InvalidHeader::Length {
+                expected: Length::clamp(4),
+                actual: Length::clamp(8),
+            },
+            InvalidHeader::MinLength {
+                expected: Length::clamp(8),
+                actual: Length::clamp(0),
+            },
+            InvalidHeader::Type(0xFF),
+        ];
+        for v in variants {
+            let err: Error = (*v).into();
+            assert_eq!(
+                err,
+                Error::Protocol,
+                "InvalidHeader::{v:?} should map to Protocol"
+            );
+        }
+    }
+}
