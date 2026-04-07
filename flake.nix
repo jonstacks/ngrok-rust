@@ -45,6 +45,10 @@
           set -euf -o pipefail
           ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs --open
         '';
+        coverage-ci = pkgs.writeShellScriptBin "coverage-ci" ''
+          set -euf -o pipefail
+          ${toolchain}/bin/cargo llvm-cov --workspace --all-targets --features hyper,axum,aws-lc-rs --lcov --output-path lcov.info
+        '';
         pre-commit = pkgs.writeShellScript "pre-commit" ''
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           result=$?
@@ -117,6 +121,7 @@
             fix-n-fmt
             coverage
             coverage-html
+            coverage-ci
             setup-hooks
             cargo-udeps
             cargo-llvm-cov
