@@ -1,3 +1,3 @@
 [workspace]
-members = ["muxado"]
-resolver = "3"
+members = ["muxado", "ngrok", "ngrok-sync", "ngrok-testing"]
+resolver = "2"

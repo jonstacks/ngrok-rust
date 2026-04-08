@@ -1,0 +1,18 @@
+[package]
+name = "muxado"
+version = "0.1.0"
+edition = "2021"
+description = "Stream-multiplexing protocol (muxado) for Rust"
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "io-util", "sync", "time", "macros"] }
+bytes = "1"
+bitflags = "2"
+thiserror = "1"
+tracing = "0.1"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
