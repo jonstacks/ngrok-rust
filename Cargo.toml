@@ -1,10 +1,3 @@
 [workspace]
-resolver = "2"
-members = [
-	"muxado",
-	"ngrok",
-	"cargo-doc-ngrok",
-]
-
-[profile.release]
-debug = 1
+members = ["muxado", "ngrok", "ngrok-sync", "ngrok-testing", "cargo-doc-ngrok"]
+resolver = "3"

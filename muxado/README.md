@@ -17,7 +17,24 @@
 [apache-badge]: https://img.shields.io/badge/license-Apache_2.0-blue.svg
 [apache-url]: https://github.com/ngrok/ngrok-rust/blob/main/LICENSE-APACHE
 
-This is the stream multiplexing protocol that powers ngrok's tunnels.
+An async Rust implementation of the muxado stream multiplexing protocol,
+built on [tokio](https://tokio.rs). Muxado multiplexes many bidirectional
+byte streams over a single transport connection (e.g. TCP or TLS).
+
+This crate powers the tunnel transport layer in the
+[ngrok Rust SDK](https://crates.io/crates/ngrok).
+
+## Features
+
+- **Fully async** — built on tokio with separate reader/writer tasks
+- **Per-stream flow control** — configurable receive windows with automatic WNDINC
+- **Zero-copy I/O** — uses `bytes::Bytes` for frame payloads
+- **Typed streams** — 4-byte type prefix for application-level stream routing
+- **Heartbeat** — periodic keep-alive with nonce verification and latency measurement
+- **Half-close** — independent FIN for each direction (HTTP-style request/response)
+- **Graceful shutdown** — GOAWAY with last-stream-ID tracking
+
+See [PROTOCOL.md](PROTOCOL.md) for the wire format specification.
 
 # License
 

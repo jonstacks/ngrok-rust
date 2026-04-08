@@ -1,0 +1,15 @@
+[package]
+name = "ngrok-sync"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ngrok = { path = "../ngrok" }
+tokio = { version = "1", features = ["full"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+url = "2"
+
+[dev-dependencies]
+ngrok-testing = { path = "../ngrok-testing" }
+tokio = { version = "1", features = ["full"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }

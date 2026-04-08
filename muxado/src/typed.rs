@@ -1,184 +1,210 @@
-//! Wrappers to add typing to muxado streams.
-
 use std::{
-    fmt,
-    ops::{
-        Deref,
-        DerefMut,
-        RangeInclusive,
+    pin::Pin,
+    task::{
+        Context,
+        Poll,
     },
 };
 
-use async_trait::async_trait;
-use bytes::{
-    Buf,
-    BufMut,
-};
+use bytes::Bytes;
 use tokio::io::{
+    AsyncRead,
     AsyncReadExt,
+    AsyncWrite,
     AsyncWriteExt,
+    ReadBuf,
 };
-use tracing::debug;
 
 use crate::{
-    constrained::*,
-    errors::Error,
-    session::{
-        Accept,
-        OpenClose,
-        Session,
-    },
-    stream::Stream,
+    error::MuxadoError,
+    session::Session,
+    stream::MuxadoStream,
 };
 
-constrained_num! {
-    /// A muxado stream type.
-    StreamType, u32, 0..=u32::MAX, clamp
-}
+/// A 4-byte stream type identifier, written as the first bytes of a stream.
+pub type StreamType = u32;
 
-/// Wrapper for a session capable of opening streams prefixed with a `u32` type
-/// id.
-#[derive(Clone)]
-pub struct Typed<S> {
-    inner: S,
-}
-
-impl<S> DerefMut for Typed<S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl<S> Deref for Typed<S> {
-    type Target = S;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<S> Typed<S>
-where
-    S: Session,
-{
-    /// Wrap a session for use with typed streams.
-    pub fn new(inner: S) -> Self {
-        Typed { inner }
-    }
-}
-
-/// A typed muxado stream.
+/// An accepted stream with its type.
 pub struct TypedStream {
-    typ: StreamType,
-    inner: Stream,
-}
-
-impl DerefMut for TypedStream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-impl Deref for TypedStream {
-    type Target = Stream;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
+    pub stream_type: StreamType,
+    pub stream: MuxadoStream,
 }
 
 impl TypedStream {
-    /// Get the type ID for this stream.
-    pub fn typ(&self) -> StreamType {
-        self.typ
+    /// Returns the stream type.
+    pub fn stream_type(&self) -> StreamType {
+        self.stream_type
+    }
+
+    /// Returns the stream ID.
+    pub fn id(&self) -> u32 {
+        self.stream.id()
+    }
+
+    /// Half-close the write side.
+    pub fn close_write(&self) {
+        self.stream.close_write();
+    }
+
+    /// Yield the next frame payload as zero-copy `Bytes`.
+    pub async fn next_frame_payload(&mut self) -> Option<Bytes> {
+        self.stream.next_frame_payload().await
     }
 }
 
-/// Typed analogue to the [Session] trait.
-pub trait TypedSession: TypedAccept + TypedOpenClose {
-    /// The component implementing [TypedAccept].
-    type TypedAccept: TypedAccept;
-    /// The component implementing [TypedOpen].
-    type TypedOpen: TypedOpenClose;
-
-    /// Split the typed session into open/accept components.
-    fn split_typed(self) -> (Self::TypedOpen, Self::TypedAccept);
+impl AsyncRead for TypedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
 }
 
-/// Typed analogue to the [Accept] trait.
-#[async_trait]
-pub trait TypedAccept {
-    /// Accept a typed stream.
-    ///
-    /// Because typed streams are indistinguishable from untyped streams, if the
-    /// remote isn't sending a type, then the first 4 bytes of data will be
-    /// misinterpreted as the stream type.
-    async fn accept_typed(&mut self) -> Result<TypedStream, Error>;
+impl AsyncWrite for TypedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
-/// Typed analogue to the [Open] trait.
-#[async_trait]
-pub trait TypedOpenClose {
-    /// Open a typed stream with the given type.
-    async fn open_typed(&mut self, typ: StreamType) -> Result<TypedStream, Error>;
-    /// Close the session by sending a GOAWAY
-    async fn close(&mut self, error: Error, msg: String) -> Result<(), Error>;
+/// A wrapper around `Session` that prefixes each stream with a 4-byte type.
+pub struct TypedStreamSession {
+    session: Session,
 }
 
-#[async_trait]
-impl<S> TypedAccept for Typed<S>
-where
-    S: Accept + Send,
-{
-    async fn accept_typed(&mut self) -> Result<TypedStream, Error> {
-        let mut stream = self.accept().await.ok_or(Error::SessionClosed)?;
+impl TypedStreamSession {
+    /// Wrap an existing session to add typed stream support.
+    pub fn new(session: Session) -> Self {
+        Self { session }
+    }
 
-        let mut buf = [0u8; 4];
-
+    /// Open a new stream with the given type. The type is written as the
+    /// first 4 bytes of the stream payload.
+    pub async fn open_typed(&self, stream_type: StreamType) -> Result<MuxadoStream, MuxadoError> {
+        let mut stream = self.session.open().await?;
         stream
-            .read_exact(&mut buf[..])
+            .write_all(&stream_type.to_be_bytes())
             .await
-            .map_err(|_| Error::StreamClosed)?;
-
-        let typ = StreamType::clamp((&buf[..]).get_u32());
-
-        debug!(?typ, "read stream type");
-
-        Ok(TypedStream { typ, inner: stream })
+            .map_err(MuxadoError::Io)?;
+        Ok(stream)
     }
-}
-#[async_trait]
-impl<S> TypedOpenClose for Typed<S>
-where
-    S: OpenClose + Send,
-{
-    async fn open_typed(&mut self, typ: StreamType) -> Result<TypedStream, Error> {
-        let mut stream = self.open().await?;
 
-        let mut bytes = [0u8; 4];
-        (&mut bytes[..]).put_u32(*typ);
-
+    /// Accept a remotely-initiated typed stream. Reads the first 4 bytes
+    /// as the stream type.
+    pub async fn accept_typed(&self) -> Result<TypedStream, MuxadoError> {
+        let mut stream = self.session.accept().await?;
+        let mut type_buf = [0u8; 4];
         stream
-            .write(&bytes[..])
+            .read_exact(&mut type_buf)
             .await
-            .map_err(|_| Error::StreamReset)?;
-
-        Ok(TypedStream { inner: stream, typ })
+            .map_err(MuxadoError::Io)?;
+        let stream_type = u32::from_be_bytes(type_buf);
+        Ok(TypedStream {
+            stream_type,
+            stream,
+        })
     }
 
-    async fn close(&mut self, error: Error, msg: String) -> Result<(), Error> {
-        self.inner.close(error, msg).await
+    /// Gracefully close the underlying session.
+    pub async fn close(&self) -> Result<(), MuxadoError> {
+        self.session.close().await
+    }
+
+    /// Wait for the session to terminate.
+    pub async fn wait(&self) {
+        self.session.wait().await;
+    }
+
+    /// Returns true if the session is dead.
+    pub fn is_dead(&self) -> bool {
+        self.session.is_dead()
+    }
+
+    /// Access the underlying session.
+    pub fn session(&self) -> &Session {
+        &self.session
     }
 }
 
-impl<S> TypedSession for Typed<S>
-where
-    S: Session + Send,
-    S::Accept: Send,
-    S::OpenClose: Send,
-{
-    type TypedAccept = Typed<S::Accept>;
-    type TypedOpen = Typed<S::OpenClose>;
-    fn split_typed(self) -> (Self::TypedOpen, Self::TypedAccept) {
-        let (open, accept) = self.inner.split();
-        (Typed { inner: open }, Typed { inner: accept })
+#[cfg(test)]
+mod tests {
+    use tokio::io::{
+        AsyncReadExt,
+        AsyncWriteExt,
+    };
+
+    use super::*;
+    use crate::config::Config;
+
+    fn make_typed_pair(config: Config) -> (TypedStreamSession, TypedStreamSession) {
+        let (c, s) = tokio::io::duplex(64 * 1024);
+        let client = TypedStreamSession::new(Session::client(c, config.clone()));
+        let server = TypedStreamSession::new(Session::server(s, config));
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn typed_stream_roundtrip() {
+        let (client, server) = make_typed_pair(Config::default());
+
+        let mut c = client.open_typed(0x42).await.unwrap();
+        c.write_all(b"typed data").await.unwrap();
+
+        let ts = server.accept_typed().await.unwrap();
+        assert_eq!(ts.stream_type, 0x42);
+        let mut s = ts.stream;
+        let mut buf = vec![0u8; 100];
+        let n = s.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"typed data");
+    }
+
+    #[tokio::test]
+    async fn multiple_typed_streams() {
+        let (client, server) = make_typed_pair(Config::default());
+
+        let mut c1 = client.open_typed(1).await.unwrap();
+        let mut c2 = client.open_typed(2).await.unwrap();
+        c1.write_all(b"type1").await.unwrap();
+        c2.write_all(b"type2").await.unwrap();
+
+        let ts1 = server.accept_typed().await.unwrap();
+        let ts2 = server.accept_typed().await.unwrap();
+
+        // Match by type
+        let (mut s1, mut s2) = if ts1.stream_type == 1 {
+            (ts1.stream, ts2.stream)
+        } else {
+            (ts2.stream, ts1.stream)
+        };
+
+        let mut buf = vec![0u8; 100];
+        let n = s1.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"type1");
+        let n = s2.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"type2");
+    }
+
+    #[tokio::test]
+    async fn max_stream_type_value() {
+        let (client, server) = make_typed_pair(Config::default());
+
+        let mut c = client.open_typed(0xFFFF_FFFF).await.unwrap();
+        c.write_all(b"x").await.unwrap();
+
+        let ts = server.accept_typed().await.unwrap();
+        assert_eq!(ts.stream_type, 0xFFFF_FFFF);
     }
 }

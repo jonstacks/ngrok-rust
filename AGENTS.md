@@ -10,8 +10,10 @@ Guidelines for AI agents working on this repository.
 
 | Crate | Path | Purpose |
 |-------|------|---------|
-| `ngrok` | `ngrok/` | Main SDK crate — tunnels, sessions, connections, config builders |
+| `ngrok` | `ngrok/` | Main SDK crate — agent, endpoints, listeners, forwarders |
 | `muxado` | `muxado/` | Stream multiplexing protocol implementation |
+| `ngrok-sync` | `ngrok-sync/` | Blocking wrapper around the async `ngrok` crate |
+| `ngrok-testing` | `ngrok-testing/` | Mock ngrok server and test fixtures for offline testing |
 | `cargo-doc-ngrok` | `cargo-doc-ngrok/` | Cargo subcommand to serve Rust docs via ngrok |
 
 ---
@@ -47,7 +49,7 @@ cargo udeps --workspace --all-targets --all-features       # Check for unused de
 cargo test --workspace --all-targets         # Unit and integration tests
 ```
 
-Online integration tests in `ngrok/src/online_tests.rs` require a valid `NGROK_AUTHTOKEN` environment variable. These are skipped automatically if the token is not set. Tests guarded by `#[cfg(feature = "paid-tests")]` require a paid ngrok account.
+Most tests run offline using `MockNgrokServer` from the `ngrok-testing` crate. Online integration tests in `ngrok/tests/integration.rs` (behind the `online-tests` feature) require a valid `NGROK_AUTHTOKEN` environment variable.
 
 ### Code Coverage
 
@@ -73,7 +75,7 @@ Formatting is configured in `rustfmt.toml`:
 imports_layout = "Vertical"
 imports_granularity = "Crate"
 group_imports = "StdExternalCrate"
-edition = "2021"
+edition = "2024"
 ```
 
 - **Clippy** is enforced with `-D warnings`. All warnings must be resolved.

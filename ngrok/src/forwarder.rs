@@ -1,99 +1,117 @@
-use std::{
-    collections::HashMap,
-    error::Error as StdError,
-};
+//! Endpoint forwarder: auto-proxy connections to an upstream.
 
-use async_trait::async_trait;
-use tokio::task::JoinHandle;
+use std::future::Future;
+
 use url::Url;
 
 use crate::{
-    Tunnel,
-    prelude::{
-        EdgeInfo,
-        EndpointInfo,
-        TunnelCloser,
-        TunnelInfo,
-    },
-    session::RpcError,
+    error::Error,
+    listener::EndpointListener,
+    upstream::ProxyProtoVersion,
 };
 
-/// An ngrok forwarder.
+/// An auto-proxy handle that forwards connections from an ngrok endpoint to an upstream.
 ///
-/// Represents a tunnel that is being forwarded to a URL.
-pub struct Forwarder<T> {
-    pub(crate) join: JoinHandle<Result<(), Box<dyn StdError + Send + Sync>>>,
-    pub(crate) inner: T,
+/// The SDK internally accepts connections and forwards them to the configured upstream;
+/// no application code is required for I/O.
+pub struct EndpointForwarder {
+    /// The public URL.
+    pub(crate) url: Url,
+    /// The endpoint ID.
+    pub(crate) id: String,
+    /// The upstream URL.
+    pub(crate) upstream_url: Url,
+    /// The upstream protocol.
+    pub(crate) upstream_protocol: Option<String>,
+    /// The PROXY protocol version.
+    pub(crate) proxy_proto: ProxyProtoVersion,
+    /// Done signaling.
+    pub(crate) done_rx: tokio::sync::watch::Receiver<bool>,
+    /// Done sender.
+    pub(crate) done_tx: tokio::sync::watch::Sender<bool>,
+    /// The forwarding task handle.
+    pub(crate) _task: tokio::task::JoinHandle<()>,
 }
 
-impl<T> Forwarder<T> {
-    /// Wait for the forwarding task to exit.
-    pub fn join(&mut self) -> &mut JoinHandle<Result<(), Box<dyn StdError + Send + Sync>>> {
-        &mut self.join
+impl EndpointForwarder {
+    /// The public URL assigned by ngrok cloud.
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// The endpoint ID.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The upstream URL.
+    pub fn upstream_url(&self) -> &Url {
+        &self.upstream_url
+    }
+
+    /// The upstream protocol, if set.
+    pub fn upstream_protocol(&self) -> Option<&str> {
+        self.upstream_protocol.as_deref()
+    }
+
+    /// The PROXY protocol version.
+    pub fn proxy_protocol(&self) -> ProxyProtoVersion {
+        self.proxy_proto
+    }
+
+    /// A future that resolves when this forwarder has been closed.
+    pub fn done(&self) -> impl Future<Output = ()> + '_ {
+        let mut rx = self.done_rx.clone();
+        async move {
+            while !*rx.borrow() {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Close the forwarder and stop forwarding connections.
+    pub async fn close(self) -> Result<(), Error> {
+        let _ = self.done_tx.send(true);
+        Ok(())
     }
 }
 
-#[async_trait]
-impl<T> TunnelCloser for Forwarder<T>
-where
-    T: TunnelCloser + Send,
-{
-    async fn close(&mut self) -> Result<(), RpcError> {
-        self.inner.close().await
-    }
-}
+/// Spawn the forwarding loop task.
+pub(crate) fn spawn_forward_loop(
+    mut listener: EndpointListener,
+    upstream_addr: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let (stream, _addr) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => break,
+            };
 
-impl<T> TunnelInfo for Forwarder<T>
-where
-    T: TunnelInfo,
-{
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn forwards_to(&self) -> &str {
-        self.inner.forwards_to()
-    }
-
-    fn metadata(&self) -> &str {
-        self.inner.metadata()
-    }
-}
-
-impl<T> EndpointInfo for Forwarder<T>
-where
-    T: EndpointInfo,
-{
-    fn proto(&self) -> &str {
-        self.inner.proto()
-    }
-
-    fn url(&self) -> &str {
-        self.inner.url()
-    }
-}
-
-impl<T> EdgeInfo for Forwarder<T>
-where
-    T: EdgeInfo,
-{
-    fn labels(&self) -> &HashMap<String, String> {
-        self.inner.labels()
-    }
-}
-
-pub(crate) fn forward<T>(mut listener: T, info: T, to_url: Url) -> Result<Forwarder<T>, RpcError>
-where
-    T: Tunnel + Send + 'static,
-    <T as Tunnel>::Conn: crate::tunnel_ext::ConnExt,
-{
-    let handle =
-        tokio::spawn(
-            async move { Ok(crate::tunnel_ext::forward_tunnel(&mut listener, to_url).await?) },
-        );
-
-    Ok(Forwarder {
-        join: handle,
-        inner: info,
+            let addr = upstream_addr.clone();
+            tokio::spawn(async move {
+                if let Err(e) = forward_one(stream, &addr).await {
+                    tracing::debug!(error = %e, "forward connection error");
+                }
+            });
+        }
     })
+}
+
+/// Forward a single connection to the upstream.
+async fn forward_one(
+    mut ngrok_stream: crate::listener::NgrokStream,
+    addr: &str,
+) -> Result<(), Error> {
+    let mut upstream = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(Error::Io)?;
+
+    tokio::io::copy_bidirectional(&mut ngrok_stream, &mut upstream)
+        .await
+        .map_err(Error::Io)?;
+
+    Ok(())
 }
