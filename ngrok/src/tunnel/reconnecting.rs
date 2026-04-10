@@ -70,6 +70,9 @@ pub(crate) struct DialConfig {
     pub heartbeat_tolerance: Duration,
 }
 
+/// Type alias for event handler list.
+type EventHandlers = Arc<Vec<Box<dyn Fn(Event) + Send + Sync>>>;
+
 /// Inner state shared between the reconnect task and the Agent.
 pub(crate) struct ReconnectInner {
     /// Auth extra to send on each connection.
@@ -81,7 +84,7 @@ pub(crate) struct ReconnectInner {
     /// RPC handler.
     pub rpc_handler: Option<Arc<dyn Fn(RpcRequest) -> RpcResponse + Send + Sync>>,
     /// Event handlers.
-    pub event_handlers: Arc<Vec<Box<dyn Fn(Event) + Send + Sync>>>,
+    pub event_handlers: EventHandlers,
     /// Session cookie for reconnection.
     pub cookie: RwLock<String>,
     /// The current session info.
@@ -125,15 +128,14 @@ impl ReconnectingSession {
         let resp = do_bind(&self.inner, &config).await?;
 
         // Save the assigned hostname so re-binds after reconnect get the same URL.
-        if let Ok(url) = url::Url::parse(&resp.url) {
-            if let Some(host) = url.host_str() {
-                if let Some(obj) = config.bind_req.opts.as_object_mut() {
-                    obj.insert(
-                        "Hostname".into(),
-                        serde_json::Value::String(host.to_string()),
-                    );
-                }
-            }
+        if let Ok(url) = url::Url::parse(&resp.url)
+            && let Some(host) = url.host_str()
+            && let Some(obj) = config.bind_req.opts.as_object_mut()
+        {
+            obj.insert(
+                "Hostname".into(),
+                serde_json::Value::String(host.to_string()),
+            );
         }
 
         // Register for re-bind
@@ -315,7 +317,9 @@ async fn reconnect_loop(inner: Arc<ReconnectInner>) {
 }
 
 /// Dial and authenticate to ngrok cloud.
-async fn dial_and_auth(inner: &ReconnectInner) -> Result<(RawSession, Arc<TypedStreamSession>, AuthResp), Error> {
+async fn dial_and_auth(
+    inner: &ReconnectInner,
+) -> Result<(RawSession, Arc<TypedStreamSession>, AuthResp), Error> {
     let config = &inner.dial_config;
 
     // TCP connect.

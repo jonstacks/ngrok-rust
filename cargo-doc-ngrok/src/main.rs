@@ -86,11 +86,7 @@ async fn main() -> Result<(), BoxError> {
     let default_package = args
         .package
         .or_else(|| meta.root_package().map(|p| p.name.clone()))
-        .or_else(|| {
-            meta.workspace_packages()
-                .first()
-                .map(|p| p.name.clone())
-        })
+        .or_else(|| meta.workspace_packages().first().map(|p| p.name.clone()))
         .ok_or("No default package found. You must provide one with -p")?;
     let root_dir = meta.workspace_root;
     let target_dir = meta.target_directory;
