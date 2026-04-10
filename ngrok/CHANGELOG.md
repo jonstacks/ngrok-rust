@@ -1,3 +1,42 @@
+## 0.19.0 (unreleased)
+
+### Breaking Changes — Full API Rewrite
+
+The `ngrok` crate has been rewritten with a simplified, agent-centric API.
+
+**New public API:**
+
+- `AgentBuilder` / `Agent` replace `Session::builder()` / `Session`.
+- `EndpointOptions` / `EndpointOptionsBuilder` replace per-protocol config
+  builders (`HttpTunnelBuilder`, `TcpTunnelBuilder`, `LabeledTunnelBuilder`, etc.).
+- `EndpointListener` replaces `Tunnel` types for accepting connections.
+- `EndpointForwarder` replaces `ForwarderBuilder` for forwarding to upstream services.
+- `NgrokStream` / `NgrokAddr` replace `Conn` / `EndpointConn`.
+- `AgentSession` replaces `SessionInfo`.
+- Event types (`AgentConnectSucceededEvent`, `AgentDisconnectedEvent`,
+  `AgentHeartbeatReceivedEvent`, `ConnectionOpenedEvent`,
+  `ConnectionClosedEvent`, `HttpRequestCompleteEvent`) replace the old
+  callback-based session handlers.
+
+**Removed:**
+
+- `Session` and `SessionBuilder` (replaced by `Agent` / `AgentBuilder`).
+- Per-protocol config modules (`config::http`, `config::tcp`, `config::tls`,
+  `config::labeled`, `config::common`, `config::oauth`, `config::oidc`,
+  `config::policies`, `config::headers`, `config::webhook_verification`).
+- `Tunnel`, `TunnelExt`, `TunnelCloser`, `Conn`, `EndpointConn` types.
+- `proxy_proto` module.
+- `online_tests.rs` (replaced by `tests/integration.rs`).
+- Example programs (`axum`, `connect`, `domain`, `labeled`, `mingrok`, `tls`).
+- Policy JSON assets.
+
+**New crates in the workspace:**
+
+- `ngrok-sync` — blocking wrapper around the async `ngrok` crate for
+  non-async contexts and FFI.
+- `ngrok-testing` — mock ngrok server (`MockNgrokServer`) and test utilities
+  for offline integration testing.
+
 ## 0.18.0
 - Add support for CEL filtering when listing resources.
 - Add support for service users

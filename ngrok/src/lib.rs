@@ -1,104 +1,96 @@
-#![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
-#![cfg_attr(docsrs, feature(doc_cfg))]
+//! # ngrok
+//!
+//! Async Rust SDK for ngrok.
 
-mod internals {
-    #[macro_use]
-    pub mod rpc;
-    pub mod proto;
-    pub mod raw_session;
-}
-
-/// Tunnel and endpoint configuration types.
-pub mod config {
-    #[macro_use]
-    mod common;
-    pub use common::*;
-
-    mod headers;
-    mod http;
-    pub use self::http::*;
-    mod labeled;
-    pub use labeled::*;
-    mod oauth;
-    pub use oauth::*;
-    mod oidc;
-    pub use policies::*;
-    mod policies;
-    pub use oidc::*;
-    mod tcp;
-    pub use tcp::*;
-    mod tls;
-    pub use tls::*;
-    mod webhook_verification;
-}
-
-mod proxy_proto;
-
-/// Types for working with the ngrok session.
-pub mod session;
-/// Types for working with ngrok tunnels.
-pub mod tunnel;
-
-/// Types for working with ngrok connections.
-pub mod conn;
-
-/// Types for working with connection forwarders.
+pub mod agent;
+pub mod defaults;
+pub mod diagnose;
+pub mod endpoint;
+pub mod error;
+pub mod events;
 pub mod forwarder;
-mod tunnel_ext;
+pub mod listener;
+pub mod options;
+pub mod proto;
+pub mod rpc;
+pub mod session;
+pub mod upstream;
 
-#[doc(inline)]
-pub use conn::{
-    Conn,
-    EdgeConn,
-    EndpointConn,
+pub(crate) mod tunnel;
+
+pub mod integrations;
+
+pub use agent::{
+    Agent,
+    AgentBuilder,
 };
-#[doc(inline)]
-pub use internals::proto::Error;
-#[doc(inline)]
-pub use session::Session;
-#[doc(inline)]
-pub use tunnel::Tunnel;
+pub use defaults::{
+    forward,
+    listen,
+};
+pub use diagnose::DiagnoseResult;
+pub use endpoint::{
+    EndpointInfo,
+    EndpointKind,
+};
+pub use error::{
+    DiagnoseError,
+    Error,
+};
+pub use events::{
+    AgentConnectSucceededEvent,
+    AgentDisconnectedEvent,
+    AgentHeartbeatReceivedEvent,
+    ConnectionClosedEvent,
+    ConnectionOpenedEvent,
+    Event,
+    HttpRequestCompleteEvent,
+};
+pub use forwarder::EndpointForwarder;
+pub use listener::{
+    EndpointListener,
+    NgrokAddr,
+    NgrokStream,
+};
+pub use options::{
+    EndpointOptions,
+    EndpointOptionsBuilder,
+};
+pub use rpc::{
+    RpcMethod,
+    RpcRequest,
+    RpcResponse,
+};
+pub use session::AgentSession;
+pub use upstream::{
+    ProxyProtoVersion,
+    Upstream,
+};
 
-/// A prelude of traits for working with ngrok types.
-pub mod prelude {
-    #[allow(deprecated)]
-    #[doc(inline)]
-    pub use crate::{
-        config::{
-            Action,
-            ForwarderBuilder,
-            HttpTunnelBuilder,
-            InvalidPolicy,
-            LabeledTunnelBuilder,
-            OauthOptions,
-            OidcOptions,
-            Policy,
-            ProxyProto,
-            Rule,
-            Scheme,
-            TcpTunnelBuilder,
-            TlsTunnelBuilder,
-            TunnelBuilder,
-        },
-        conn::{
-            Conn,
-            ConnInfo,
-            EdgeConnInfo,
-            EndpointConnInfo,
-        },
-        internals::proto::EdgeType,
-        internals::proto::Error,
-        tunnel::{
-            EdgeInfo,
-            EndpointInfo,
-            Tunnel,
-            TunnelCloser,
-            TunnelInfo,
-        },
-        tunnel_ext::TunnelExt,
-    };
+/// Default ngrok cloud connect address.
+pub const DEFAULT_CONNECT_URL: &str = "connect.ngrok-agent.com:443";
+
+/// Minimum TLS version required.
+pub const MIN_TLS_VERSION: rustls::ProtocolVersion = rustls::ProtocolVersion::TLSv1_2;
+
+/// Extension trait for `AgentBuilder` to simplify test setup.
+///
+/// Available when the `testing` feature is enabled or `ngrok-testing` is a dev-dependency.
+pub trait AgentTestExt: Sized {
+    /// Connect to a `MockNgrokServer` instead of real ngrok cloud.
+    fn with_mock_server(self, connect_url: &str) -> Self;
+
+    /// Skip TLS verification (for in-process test servers using self-signed certs).
+    fn danger_accept_any_cert(self) -> Self;
 }
 
-#[cfg(all(test, feature = "online-tests"))]
-mod online_tests;
+#[cfg(any(feature = "testing", test))]
+impl AgentTestExt for AgentBuilder {
+    fn with_mock_server(self, connect_url: &str) -> Self {
+        self.connect_url(connect_url).danger_accept_any_cert()
+    }
+
+    fn danger_accept_any_cert(self) -> Self {
+        self.tls_config(ngrok_testing::danger_accept_any_cert_config())
+    }
+}

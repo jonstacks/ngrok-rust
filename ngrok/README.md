@@ -19,116 +19,62 @@
 
 [API Docs (main)](https://ngrok.github.io/ngrok-rust/ngrok)
 
-[ngrok](https://ngrok.com) is a simplified API-first ingress-as-a-service that adds connectivity, 
+[ngrok](https://ngrok.com) is a simplified API-first ingress-as-a-service that adds connectivity,
 security, and observability to your apps.
 
-ngrok-rust, our native and idiomatic crate for adding a public internet address
-with secure ingress traffic directly into your Rust apps 🦀. If you’ve used ngrok in
-the past, you can think of ngrok-rust as the ngrok agent packaged as a Rust crate.
-
-ngrok-rust lets developers serve Rust services on the internet in a single statement
-without setting up low-level network primitives like IPs, NAT, certificates,
-load balancers, and even ports! Applications using ngrok-rust listen on ngrok’s global
-ingress network for TCP and HTTP traffic. ngrok-rust listeners are usable with
-[hyper Servers](https://docs.rs/hyper/latest/hyper/server/index.html), and connections
-implement [tokio’s AsyncRead and AsyncWrite traits](https://docs.rs/tokio/latest/tokio/io/index.html).
-This makes it easy to add ngrok-rust into any application that’s built on hyper, such
-as the popular [axum](https://docs.rs/axum/latest/axum/) HTTP framework.
-
-See [`/ngrok/examples/`][examples] for example usage, or the tests in
-[`/ngrok/src/online_tests.rs`][online-tests].
-
-[examples]: https://github.com/ngrok/ngrok-rust/blob/main/ngrok/examples
-[online-tests]: https://github.com/ngrok/ngrok-rust/blob/main/ngrok/src/online_tests.rs
+ngrok-rust is the native Rust SDK for ngrok. It lets Rust applications listen on
+ngrok’s global ingress network for TCP and HTTP traffic without managing IPs, NAT,
+certificates, or load balancers. Connections implement
+[tokio’s AsyncRead and AsyncWrite traits](https://docs.rs/tokio/latest/tokio/io/index.html),
+making it easy to integrate with frameworks like [axum](https://docs.rs/axum/latest/axum/)
+and [hyper](https://docs.rs/hyper/latest/hyper/).
 
 For working with the [ngrok API](https://ngrok.com/docs/api/), check out the
 [ngrok Rust API Client Library](https://github.com/ngrok/ngrok-api-rs).
 
 ## Installation
 
-Add `ngrok` to the `[dependencies]` section of your `Cargo.toml` with `cargo add`:
+Add `ngrok` to the `[dependencies]` section of your `Cargo.toml`:
 
 ```bash
-$ cargo add ngrok
+cargo add ngrok
 ```
 
 ## Quickstart
 
 Create a simple HTTP server using `ngrok` and `axum`:
 
-`Cargo.toml`:
-
-```toml
-[package]
-name = "ngrok-rust-demo"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-ngrok = {version = "0.14.0"}
-tokio = { version = "1", features = [
-    "full"
-] }
-axum = { version = "0.7.4", features = ["tokio"] }
-async-trait = "0.1.59"
-hyper = {version = "1", features = ["full"]}
-hyper-util = { version = "0.1", features = [
-	"full"
-] }
-url = "2.5.4"
-```
-
-`src/main.rs`:
-
 ```rust
-#![deny(warnings)]
-use axum::{routing::get, Router};
-use ngrok::config::{ForwarderBuilder, TunnelBuilder};
-use std::net::SocketAddr;
-use url::Url;
+use ngrok::{AgentBuilder, EndpointOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Create Axum app
-    let app = Router::new().route("/", get(|| async { "Hello from Axum!" }));
-
-    // Spawn Axum server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tokio::spawn(async move {
-        axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
-            .await
-            .unwrap();
-    });
-
-    // Set up ngrok tunnel
-    let sess1 = ngrok::Session::builder()
+    // Build and connect an ngrok agent.
+    let agent = AgentBuilder::new()
         .authtoken_from_env()
-        .connect()
+        .build()
         .await?;
-    let sess2 = ngrok::Session::builder()
-        .authtoken_from_env()
-        .connect()
+    agent.connect().await?;
+
+    // Forward traffic to a local service.
+    let _forwarder = agent
+        .forward(
+            EndpointOptions::builder()
+                .url("https://your-domain.ngrok.app")
+                .build(),
+            "http://localhost:3000",
+        )
         .await?;
 
-    let _listener = sess1
-        .http_endpoint()
-        .domain("/* your domain*/")
-        .pooling_enabled(true)
-        .listen_and_forward(Url::parse("http://localhost:3000").unwrap())
-        .await?;
-    let _listener2 = sess2
-        .http_endpoint()
-        .domain("/* your domain */")
-        .pooling_enabled(true)
-        .listen_and_forward(Url::parse("http://localhost:8000").unwrap())
-        .await?;
-
-    // Wait indefinitely
+    // Wait indefinitely.
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
-
 ```
+
+See [`/ngrok/tests/integration.rs`][integration-tests] for more usage examples.
+
+[integration-tests]: https://github.com/ngrok/ngrok-rust/blob/main/ngrok/tests/integration.rs
 
 # Changelog
 

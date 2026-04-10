@@ -1,24 +1,28 @@
-#![doc = include_str!("../README.md")]
-#![warn(missing_docs)]
-
-#[macro_use]
-mod constrained;
-
-mod codec;
-mod errors;
-mod frame;
-mod session;
-mod stream;
-mod stream_manager;
-mod stream_output;
-pub mod typed;
-mod window;
-
-pub use errors::Error;
-pub use session::*;
-pub use stream::Stream;
-
+pub mod buffer;
+pub mod config;
+pub mod error;
+pub mod frame;
 pub mod heartbeat;
+pub mod session;
+pub mod stream;
+pub mod typed;
+pub mod window;
 
-#[cfg(test)]
-mod cancellation_test;
+// Re-export main types for convenience
+pub use config::Config;
+/// Alias for backwards compatibility with the old API.
+pub type SessionConfig = Config;
+pub use error::{
+    ErrorCode,
+    MuxadoError,
+};
+pub use heartbeat::{
+    Heartbeat,
+    HeartbeatConfig,
+};
+pub use session::Session;
+pub use stream::MuxadoStream;
+pub use typed::{
+    TypedStream,
+    TypedStreamSession,
+};
