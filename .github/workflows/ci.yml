@@ -28,7 +28,7 @@ jobs:
     name: Udeps
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/rust-cache
       - run: cargo udeps --workspace --all-targets --all-features
@@ -37,7 +37,7 @@ jobs:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/nix-setup
       - run: cargo fmt --all -- --check
 
@@ -45,7 +45,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/rust-cache
       - run: cargo clippy --all-targets --all-features --workspace -- -D warnings
@@ -54,7 +54,7 @@ jobs:
     name: Test Nix
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/rust-cache
       - run: cargo test --workspace --all-targets
@@ -65,8 +65,8 @@ jobs:
     needs: check-secret
     if: needs.check-secret.outputs.has_authtoken == 'true'
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           profile: minimal
           toolchain: stable
@@ -84,8 +84,8 @@ jobs:
     needs: check-secret
     if: needs.check-secret.outputs.has_authtoken == 'true'
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
           profile: minimal
           toolchain: stable
@@ -104,7 +104,7 @@ jobs:
       matrix:
         crate: [muxado, ngrok]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/rust-cache
       - run: cargo semver-checks check-release -p ${{ matrix.crate }}
@@ -116,11 +116,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/nix-setup
       - uses: ./.github/actions/rust-cache
       - run: coverage-ci
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           fail_ci_if_error: true
           files: ./lcov.info

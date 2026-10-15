@@ -26,8 +26,8 @@ jobs:
       contents: write
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
-      - uses: jrobsonchase/direnv-action@v0.7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jrobsonchase/direnv-action@57d5101f123f9106acdd8797515c262b565ec7a5 # v0.7
       - name: cargo publish
         run: |
           version="$(extract-crate-version ${{inputs.crate}})"
